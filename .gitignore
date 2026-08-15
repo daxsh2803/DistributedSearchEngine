@@ -1,0 +1,46 @@
+# Build directories
+build/
+cmake-build-*/
+out/
+
+# Compiled binaries
+*.exe
+*.dll
+*.so
+*.a
+*.o
+*.obj
+
+# Debug files
+*.pdb
+*.ilk
+
+# IDE
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+Makefile
+
+# Testing
+Testing/
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Local environment
+.env
