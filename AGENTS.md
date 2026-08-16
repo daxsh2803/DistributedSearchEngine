@@ -78,6 +78,21 @@ Before making major changes, inspect the current repository state.
 
 ## Current Project Phase
 
-PHASE 0 — Project Foundation
+PHASE 1 — Text Processing and Tokenization
 
-Do not implement search-engine functionality yet.
+Phase 1A — Design and Learning: COMPLETE
+Phase 1B — Implementation: COMPLETE
+
+Phase 1 is fully implemented and verified.
+
+Do not implement later search-engine functionality such as:
+- inverted indexing
+- query processing
+- ranking
+- persistence
+- networking
+- sharding
+- replication
+- distributed coordination
+
+The next development phase is Phase 2 — Inverted Index.

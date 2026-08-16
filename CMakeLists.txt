@@ -22,11 +22,20 @@ elseif(MSVC)
 endif()
 
 # ---------------------------------------------------------------------------
-# Main executable. Phase 0 only: proves the project builds and runs.
-# No search-engine functionality yet.
+# Core library. Shared by the application and the tests (Phase 1B).
+# The include directory is PUBLIC so consumers can #include "tokenizer.h"
+# cleanly; warnings are PRIVATE so they do not leak into consumers.
+# ---------------------------------------------------------------------------
+add_library(dse_core STATIC src/tokenizer.cpp)
+target_include_directories(dse_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_options(dse_core PRIVATE ${PROJECT_WARNINGS})
+
+# ---------------------------------------------------------------------------
+# Main executable.
 # ---------------------------------------------------------------------------
 add_executable(DistributedSearchEngine src/main.cpp)
 target_compile_options(DistributedSearchEngine PRIVATE ${PROJECT_WARNINGS})
+target_link_libraries(DistributedSearchEngine PRIVATE dse_core)
 
 # ---------------------------------------------------------------------------
 # Tests. GoogleTest is fetched at configure time (pinned to a stable release),
@@ -53,6 +62,11 @@ if(BUILD_TESTING)
     target_compile_options(smoke_test PRIVATE ${PROJECT_WARNINGS})
     target_link_libraries(smoke_test PRIVATE GTest::gtest_main)
 
+    add_executable(tokenizer_test tests/tokenizer_test.cpp)
+    target_compile_options(tokenizer_test PRIVATE ${PROJECT_WARNINGS})
+    target_link_libraries(tokenizer_test PRIVATE GTest::gtest_main dse_core)
+
     include(GoogleTest)
     gtest_discover_tests(smoke_test)
+    gtest_discover_tests(tokenizer_test)
 endif()
