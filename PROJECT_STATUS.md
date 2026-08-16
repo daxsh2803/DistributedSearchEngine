@@ -2,6 +2,13 @@
 
 ## Current Phase
 
+Phase 2 — Inverted Index
+
+- Phase 2A — Design and Learning: **COMPLETE**
+- Phase 2B — Implementation: **PENDING**
+
+## Completed: Phase 1
+
 Phase 1 — Text Processing and Tokenization: **COMPLETE**
 
 - Phase 1A — Design and Learning: **COMPLETE**
@@ -31,6 +38,9 @@ Phase 1 — Text Processing and Tokenization: **COMPLETE**
       header/source, `tokenizer_test` target, CMake wiring)
 - [x] Phase 1B-2 — tokenizer implementation and tests (`dse::tokenize` per
       ADR-001; 45 tests across the eight Phase 1A test groups)
+- [x] Phase 2A — inverted index design specification and learning
+      documentation (`docs/learning/phase-2-inverted-index.md`,
+      `docs/decisions/ADR-002-inverted-index-design.md`)
 
 ## Verification Results (Phase 0)
 
@@ -112,6 +122,28 @@ Result: prints `DistributedSearchEngine | Phase 0 - Project Foundation` and
 Full details: `docs/learning/phase-1-tokenizer.md`, section
 "Implementation Results — Phase 1B".
 
+## Phase 2A (Design & Learning) — Completed
+
+- [x] Inverted-index fundamentals and search-engine pipeline context documented
+- [x] Data model designed (`doc_id`, `Posting {document_id, term_frequency}`,
+      postings lists always sorted by document ID)
+- [x] API proposed (`InvertedIndex` class: `add_document`, `postings`,
+      `document_count`, `term_count`, `contains`)
+- [x] Lookup semantics defined (`std::span<const Posting>`, empty for missing
+      terms, documented lifetime contract)
+- [x] Insertion semantics defined (unique docID precondition; duplicates
+      aggregated into term frequency)
+- [x] `unordered_map` vs `map` trade-offs analyzed; `unordered_map` chosen
+- [x] Complexity analyzed (O(1) average lookup; O(T) amortized per document;
+      O(distinct term-doc pairs) space)
+- [x] Edge-case table and testing strategy designed (12 test groups planned)
+- [x] Phase 1 → Phase 2 integration documented (index depends on the
+      tokenizer; both live in `dse_core`)
+- [x] Learning material: `docs/learning/phase-2-inverted-index.md`
+- [x] Architecture decision record: `docs/decisions/ADR-002-inverted-index-design.md`
+
 ## Next Phase
 
-Phase 2 — Inverted Index
+Phase 3 — Query Processing (per the pipeline documented in the phase
+learning material: Tokenizer → Inverted Index → Query Processing → Ranking
+→ Results; Phase 3 details to be designed in Phase 3A)
