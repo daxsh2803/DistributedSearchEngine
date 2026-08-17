@@ -26,7 +26,9 @@ endif()
 # The include directory is PUBLIC so consumers can #include "tokenizer.h"
 # cleanly; warnings are PRIVATE so they do not leak into consumers.
 # ---------------------------------------------------------------------------
-add_library(dse_core STATIC src/tokenizer.cpp)
+add_library(dse_core STATIC
+    src/tokenizer.cpp
+    src/inverted_index.cpp)
 target_include_directories(dse_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_options(dse_core PRIVATE ${PROJECT_WARNINGS})
 
@@ -66,7 +68,12 @@ if(BUILD_TESTING)
     target_compile_options(tokenizer_test PRIVATE ${PROJECT_WARNINGS})
     target_link_libraries(tokenizer_test PRIVATE GTest::gtest_main dse_core)
 
+    add_executable(inverted_index_test tests/inverted_index_test.cpp)
+    target_compile_options(inverted_index_test PRIVATE ${PROJECT_WARNINGS})
+    target_link_libraries(inverted_index_test PRIVATE GTest::gtest_main dse_core)
+
     include(GoogleTest)
     gtest_discover_tests(smoke_test)
     gtest_discover_tests(tokenizer_test)
+    gtest_discover_tests(inverted_index_test)
 endif()
