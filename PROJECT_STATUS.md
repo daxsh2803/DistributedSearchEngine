@@ -2,10 +2,10 @@
 
 ## Current Phase
 
-Phase 3 — Query Processing
+Phase 4 — Ranking (TF-IDF): **COMPLETE**
 
-- Phase 3A — Design and Learning: **COMPLETE**
-- Phase 3B — Implementation: **PENDING**
+- Phase 4A — Design and Learning: **COMPLETE**
+- Phase 4B — Implementation: **COMPLETE**
 
 ## Completed: Phase 1
 
@@ -14,6 +14,20 @@ Phase 1 — Text Processing and Tokenization: **COMPLETE**
 - Phase 1A — Design and Learning: **COMPLETE**
 - Phase 1B-1 — Core Library Structure: **COMPLETE**
 - Phase 1B-2 — Tokenizer Implementation and Tests: **COMPLETE**
+
+## Completed: Phase 3
+
+Phase 3 — Query Processing: **COMPLETE**
+
+- Phase 3A — Design and Learning: **COMPLETE**
+- Phase 3B — Implementation: **COMPLETE**
+
+### Phase 3B Verification Results (actual, UCRT64 toolchain)
+
+- Build: **successful, zero warnings**
+- Tests: **158/158 passed (100%)**
+  - 60 query-processor tests + 52 inverted-index tests + 45 tokenizer tests + 2 smoke tests
+- Application: exit code 0
 
 ## Completed: Phase 2
 
@@ -193,8 +207,24 @@ Full details: `docs/learning/phase-1-tokenizer.md`, section
 - [x] Learning material: `docs/learning/phase-3-query-processing.md`
 - [x] Architecture decision record: `docs/decisions/ADR-003-query-processing-design.md`
 
+### Phase 4B Verification Results (actual, UCRT64 toolchain)
+
+- Build: **successful, zero warnings**
+- Tests: **192/192 passed (100%)**
+  - 34 ranker tests (13 groups) + 60 query-processor tests + 52 inverted-index tests + 45 tokenizer tests + 2 smoke tests
+- Total test time: ~7.00 s
+- Application: exit code 0, C++20 (__cplusplus == 202002)
+
+## Completed: Phase 4A
+
+- Phase 4A — Design and Learning: **COMPLETE**
+
+- [x] TF-IDF ranking design and learning documentation
+  (`docs/learning/phase-4-ranking.md`, `docs/decisions/ADR-004-ranking-design.md`)
+- [x] Ranker class API designed (`RankedResult`, `ranked_and`, `ranked_or`)
+- [x] Scoring formula specified (tfidf = tf × ln(N/df))
+- [x] Edge cases and testing strategy documented
+
 ## Next Phase
 
-Phase 4 — Ranking (per the pipeline documented in the phase learning
-material: Tokenizer → Inverted Index → Query Processing → Ranking →
-Results; Phase 4 details to be designed in Phase 4A)
+Phase 5 — BM25 or persistence (to be designed in Phase 5A)

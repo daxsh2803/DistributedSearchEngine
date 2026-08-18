@@ -29,7 +29,8 @@ endif()
 add_library(dse_core STATIC
     src/tokenizer.cpp
     src/inverted_index.cpp
-    src/query_processor.cpp)
+    src/query_processor.cpp
+    src/ranker.cpp)
 target_include_directories(dse_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_options(dse_core PRIVATE ${PROJECT_WARNINGS})
 
@@ -77,9 +78,14 @@ if(BUILD_TESTING)
     target_compile_options(query_processor_test PRIVATE ${PROJECT_WARNINGS})
     target_link_libraries(query_processor_test PRIVATE GTest::gtest_main dse_core)
 
+    add_executable(ranker_test tests/ranker_test.cpp)
+    target_compile_options(ranker_test PRIVATE ${PROJECT_WARNINGS})
+    target_link_libraries(ranker_test PRIVATE GTest::gtest_main dse_core)
+
     include(GoogleTest)
     gtest_discover_tests(smoke_test)
     gtest_discover_tests(tokenizer_test)
     gtest_discover_tests(inverted_index_test)
     gtest_discover_tests(query_processor_test)
+    gtest_discover_tests(ranker_test)
 endif()

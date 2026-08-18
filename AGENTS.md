@@ -78,10 +78,17 @@ Before making major changes, inspect the current repository state.
 
 ## Current Project Phase
 
-PHASE 3 — Query Processing
+PHASE 4 — Ranking (TF-IDF)
 
-Phase 3A — Design and Learning: COMPLETE
-Phase 3B — Implementation: PENDING
+Phase 4A — Design and Learning: COMPLETE
+Phase 4B — Implementation: COMPLETE
 
-Phase 3A design and learning are complete.
-Phase 3B implementation has not started yet.
+Phase 4B has been implemented and verified.
+The next development phase is Phase 5.
+
+Do not implement later search-engine functionality such as:
+- persistence
+- networking
+- sharding
+- replication
+- distributed coordination
