@@ -2,10 +2,10 @@
 
 ## Current Phase
 
-Phase 2 — Inverted Index
+Phase 3 — Query Processing
 
-- Phase 2A — Design and Learning: **COMPLETE**
-- Phase 2B — Implementation: **PENDING**
+- Phase 3A — Design and Learning: **COMPLETE**
+- Phase 3B — Implementation: **PENDING**
 
 ## Completed: Phase 1
 
@@ -14,6 +14,13 @@ Phase 1 — Text Processing and Tokenization: **COMPLETE**
 - Phase 1A — Design and Learning: **COMPLETE**
 - Phase 1B-1 — Core Library Structure: **COMPLETE**
 - Phase 1B-2 — Tokenizer Implementation and Tests: **COMPLETE**
+
+## Completed: Phase 2
+
+Phase 2 — Inverted Index: **COMPLETE**
+
+- Phase 2A — Design and Learning: **COMPLETE**
+- Phase 2B — Implementation: **COMPLETE**
 
 ## Completed
 
@@ -41,6 +48,12 @@ Phase 1 — Text Processing and Tokenization: **COMPLETE**
 - [x] Phase 2A — inverted index design specification and learning
       documentation (`docs/learning/phase-2-inverted-index.md`,
       `docs/decisions/ADR-002-inverted-index-design.md`)
+- [x] Phase 2B — inverted index implementation and tests
+      (`dse::InvertedIndex` per ADR-002; full suite 99/99 passing:
+      52 index tests + 3 integration tests + 45 tokenizer + 2 smoke)
+- [x] Phase 3A — query processing design specification and learning
+      documentation (`docs/learning/phase-3-query-processing.md`,
+      `docs/decisions/ADR-003-query-processing-design.md`)
 
 ## Verification Results (Phase 0)
 
@@ -142,8 +155,46 @@ Full details: `docs/learning/phase-1-tokenizer.md`, section
 - [x] Learning material: `docs/learning/phase-2-inverted-index.md`
 - [x] Architecture decision record: `docs/decisions/ADR-002-inverted-index-design.md`
 
+## Phase 2B (Implementation) — Completed
+
+- [x] `dse::InvertedIndex` implemented exactly per ADR-002
+      (`src/inverted_index.h`, `src/inverted_index.cpp`; added to `dse_core`)
+- [x] Document-ID/TF data model with postings always sorted by document ID
+- [x] Unique-docID precondition enforced (assert in debug builds)
+- [x] `std::span<const Posting>` lookups with documented lifetime contract
+- [x] `inverted_index_test.cpp` covers the 12 planned test groups plus
+      3 tokenizer-integration tests
+
+### Phase 2B Verification Results (actual, 2026-08-16, UCRT64 toolchain)
+
+- Build: **successful, zero warnings** (`-Wall -Wextra -Wpedantic`)
+- Tests: **99/99 passed (100%)** — 52 inverted-index tests (12 groups)
+  + 3 integration tests + 45 tokenizer tests + 2 Phase 0 smoke tests
+- Application: `DistributedSearchEngine.exe` ran with exit code 0
+- Total test time: ~1.9-2.2 s (functional check; **no performance
+  benchmark was performed**)
+
+## Phase 3A (Design & Learning) — Completed
+
+- [x] Query-processing pipeline context and Boolean retrieval semantics
+      documented (AND = intersection, OR = union over postings lists)
+- [x] Two-pointer merge algorithms specified step by step (intersection,
+      union, O(a + b) each)
+- [x] Missing-term, duplicate-term, and empty-query semantics defined
+- [x] API proposed (`intersect`, `merge_union` primitives + `QueryProcessor`
+      class with `and_query` / `or_query`; borrowed-index lifetime contract)
+- [x] Complexity and memory analysis (O(Q + V log V) prep; O(a + b) merges;
+      O(result) memory, no postings copies)
+- [x] Edge-case table (22 rows) and 12-group testing strategy designed
+- [x] Phase 1 → 2 → 3 integration documented (one-way dependencies,
+      all in `dse_core`)
+- [x] Deferrals documented (ranking/BM25, phrases, positions, fuzzy,
+      negation/query language, pagination, persistence, distribution)
+- [x] Learning material: `docs/learning/phase-3-query-processing.md`
+- [x] Architecture decision record: `docs/decisions/ADR-003-query-processing-design.md`
+
 ## Next Phase
 
-Phase 3 — Query Processing (per the pipeline documented in the phase
-learning material: Tokenizer → Inverted Index → Query Processing → Ranking
-→ Results; Phase 3 details to be designed in Phase 3A)
+Phase 4 — Ranking (per the pipeline documented in the phase learning
+material: Tokenizer → Inverted Index → Query Processing → Ranking →
+Results; Phase 4 details to be designed in Phase 4A)
