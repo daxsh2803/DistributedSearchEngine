@@ -78,17 +78,28 @@ Before making major changes, inspect the current repository state.
 
 ## Current Project Phase
 
-PHASE 4 — Ranking (TF-IDF)
+PHASE 5 — Search API: COMPLETE
 
-Phase 4A — Design and Learning: COMPLETE
-Phase 4B — Implementation: COMPLETE
+Phase 5A — Design and Learning: COMPLETE
+Phase 5B-1 — SearchService: COMPLETE
+Phase 5B-2 — HTTP Server + HTTP API Tests: COMPLETE
+Phase 5B-3 — Application Integration: COMPLETE
 
-Phase 4B has been implemented and verified.
-The next development phase is Phase 5.
+Phase 5 is fully implemented and verified (244/244 tests passing).
+
+Do not implement later search-engine functionality such as:
+- document ingestion API
+- persistence
+- caching
+- authentication
+- rate limiting
+- Docker/deployment
+- distributed querying
+
+The next development phase is Phase 6 — Document Ingestion.
 
 Do not implement later search-engine functionality such as:
 - persistence
-- networking
 - sharding
 - replication
 - distributed coordination

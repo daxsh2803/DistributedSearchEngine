@@ -2,10 +2,12 @@
 
 ## Current Phase
 
-Phase 4 — Ranking (TF-IDF): **COMPLETE**
+Phase 5 — Search API: **COMPLETE**
 
-- Phase 4A — Design and Learning: **COMPLETE**
-- Phase 4B — Implementation: **COMPLETE**
+- Phase 5A — Design and Learning: **COMPLETE**
+- Phase 5B-1 — SearchService: **COMPLETE**
+- Phase 5B-2 — HTTP Server + API Tests: **COMPLETE**
+- Phase 5B-3 — Application Integration: **COMPLETE**
 
 ## Completed: Phase 1
 
@@ -215,6 +217,62 @@ Full details: `docs/learning/phase-1-tokenizer.md`, section
 - Total test time: ~7.00 s
 - Application: exit code 0, C++20 (__cplusplus == 202002)
 
+## Completed: Phase 5B-1
+
+Phase 5B-1 — SearchService: **COMPLETE**
+
+- [x] SearchService class implemented (`src/search_service.h`, `src/search_service.cpp`)
+- [x] Request/response data model (`SearchRequest`, `SearchResponse`, `SearchResult`, `SearchMode`)
+- [x] Request validation (empty query, zero limit)
+- [x] AND/OR mode routing to Ranker
+- [x] Result limiting after ranking
+- [x] 28 SearchService unit tests (8 groups)
+
+### Phase 5B-1 Verification Results (actual, UCRT64 toolchain)
+
+- Build: **successful, zero warnings**
+- Tests: **220/220 passed (100%)**
+  - 28 search-service tests + 34 ranker tests + 60 query-processor tests + 52 inverted-index tests + 45 tokenizer tests + 2 smoke tests
+- Total test time: ~5.45 s
+
+## Completed: Phase 5B-2
+
+Phase 5B-2 — HTTP Server + HTTP API Integration Tests: **COMPLETE**
+
+- [x] HttpServer class implemented (`src/http_server.h`, `src/http_server.cpp`)
+- [x] GET /search endpoint with query parameters (q, mode, limit)
+- [x] JSON serialization using nlohmann/json
+- [x] HTTP status codes (200, 400, 500)
+- [x] Server lifecycle (start, stop, wait_until_ready, destructor)
+- [x] 19 HTTP API integration tests (real HTTP requests to localhost)
+
+### Phase 5B-2 Verification Results (actual, UCRT64 toolchain)
+
+- Build: **successful, zero warnings**
+- Tests: **239/239 passed (100%)**
+  - 19 HTTP API tests + 28 search-service tests + 34 ranker tests + 60 query-processor tests + 52 inverted-index tests + 45 tokenizer tests + 2 smoke tests
+- Total test time: ~51 s (HTTP tests dominate due to server lifecycle overhead)
+- Application: exit code 0, C++20 (__cplusplus == 202002)
+
+## Completed: Phase 5B-3
+
+Phase 5B-3 — Application Integration: **COMPLETE**
+
+- [x] Application entry point rewritten (`src/main.cpp`)
+- [x] Seed corpus: 20 documents covering animals, programming, infrastructure, search concepts
+- [x] Port configuration: `--port` CLI arg > `DSE_PORT` env var > default 8080
+- [x] Clean shutdown via SIGINT/SIGTERM signal handler
+- [x] `HttpServer::listen(port)` fixed to use specific port (not always OS-assigned)
+- [x] 5 application integration tests
+
+### Phase 5B-3 Verification Results (actual, UCRT64 toolchain)
+
+- Build: **successful, zero warnings**
+- Tests: **244/244 passed (100%)**
+  - 5 app integration tests + 19 HTTP API tests + 28 search-service tests + 34 ranker tests + 60 query-processor tests + 52 inverted-index tests + 45 tokenizer tests + 2 smoke tests
+- Total test time: ~66 s
+- Application: starts, serves HTTP, responds to curl, shuts down cleanly
+
 ## Completed: Phase 4A
 
 - Phase 4A — Design and Learning: **COMPLETE**
@@ -227,4 +285,4 @@ Full details: `docs/learning/phase-1-tokenizer.md`, section
 
 ## Next Phase
 
-Phase 5 — BM25 or persistence (to be designed in Phase 5A)
+Phase 6 — Document Ingestion (to be implemented next)

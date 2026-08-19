@@ -1,21 +1,171 @@
-// Distributed Search Engine - Phase 0 (Project Foundation).
+// Distributed Search Engine - Application Entry Point (Phase 5B-3).
 //
-// This executable exists to prove that the project builds and runs under
-// C++20. No search-engine functionality is implemented yet.
+// Starts the HTTP search server with a small deterministic seed corpus.
+// The seed corpus is temporary bootstrap data for Phase 5.
+// Document ingestion through an API is deferred to a later phase.
+//
+// Port configuration (first match wins):
+//   1. --port <number>   command-line argument
+//   2. DSE_PORT=<number> environment variable
+//   3. default: 8080
+//
+// Shutdown: press Ctrl+C (SIGINT) or send SIGTERM.
 
+#include "http_server.h"
+#include "inverted_index.h"
+#include "search_service.h"
+#include "tokenizer.h"
+
+#include <atomic>
+#include <csignal>
+#include <cstdlib>
 #include <iostream>
+#include <string>
 #include <string_view>
+#include <thread>
+#include <vector>
 
 namespace {
 
-constexpr std::string_view kAppName = "DistributedSearchEngine";
-constexpr std::string_view kPhase   = "Phase 0 - Project Foundation";
+// Global pointer to the server for signal handler access.
+// Safe because only one HttpServer exists, and stop() is thread-safe.
+std::atomic<dse::HttpServer*> g_server = nullptr;
+
+void signal_handler(int /*signum*/)
+{
+    if (auto* srv = g_server.load()) {
+        srv->stop();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Seed corpus — small, deterministic demo data for Phase 5.
+// ---------------------------------------------------------------------------
+
+void load_seed_corpus(dse::InvertedIndex& index)
+{
+    struct Doc {
+        dse::doc_id id;
+        std::string_view text;
+    };
+
+    const std::vector<Doc> docs = {
+        {  1, "The quick brown fox jumps over the lazy dog" },
+        {  2, "A fast red fox leaps over a sleeping hound" },
+        {  3, "The quick brown dog chases the lazy fox" },
+        {  4, "C++ is a high-performance systems programming language" },
+        {  5, "Rust is a systems language focused on memory safety" },
+        {  6, "Python is a versatile scripting language" },
+        {  7, "The Linux kernel is written in C" },
+        {  8, "Git is a distributed version control system" },
+        {  9, "Docker containers package applications for deployment" },
+        { 10, "A search engine indexes documents for fast retrieval" },
+        { 11, "Inverted maps map terms to document lists" },
+        { 12, "TF-IDF scores term importance across documents" },
+        { 13, "PostgreSQL is a relational database management system" },
+        { 14, "Redis is an in-memory key-value store" },
+        { 15, "Kafka handles high-throughput event streaming" },
+        { 16, "Kubernetes orchestrates containerized applications" },
+        { 17, "Machine learning models learn patterns from data" },
+        { 18, "Neural networks are inspired by biological neurons" },
+        { 19, "Web browsers render HTML and execute JavaScript" },
+        { 20, "HTTP is the foundation of data communication on the web" },
+    };
+
+    for (const auto& doc : docs) {
+        index.add_document(doc.id, doc.text);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Command-line / environment port configuration
+// ---------------------------------------------------------------------------
+
+int parse_port(int argc, char* argv[])
+{
+    for (int i = 1; i < argc - 1; ++i) {
+        if (std::string_view(argv[i]) == "--port") {
+            try {
+                return std::stoi(argv[i + 1]);
+            } catch (...) {
+                std::cerr << "Invalid port: " << argv[i + 1] << "\n";
+                return -1;
+            }
+        }
+    }
+    return 0;  // not specified on command line
+}
+
+int resolve_port(int argc, char* argv[])
+{
+    // 1. Command-line argument
+    if (const int cli_port = parse_port(argc, argv); cli_port > 0) {
+        return cli_port;
+    }
+
+    // 2. Environment variable
+    if (const char* env = std::getenv("DSE_PORT")) {
+        try {
+            const int p = std::stoi(env);
+            if (p > 0) return p;
+        } catch (...) {}
+    }
+
+    // 3. Default
+    return 8080;
+}
 
 } // namespace
 
-int main()
+int main(int argc, char* argv[])
 {
-    std::cout << kAppName << " | " << kPhase << '\n';
-    std::cout << "Built with C++ standard: " << __cplusplus << '\n';
+    std::cout << "Distributed Search Engine | Phase 5 - Search API\n";
+    std::cout << "Built with C++ standard: " << __cplusplus << "\n\n";
+
+    // --- Build the search index with seed data ---
+    dse::InvertedIndex index;
+    load_seed_corpus(index);
+    std::cout << "Loaded " << index.document_count() << " seed documents ("
+              << index.term_count() << " distinct terms)\n";
+
+    // --- Create the service layer ---
+    const dse::SearchService service(index);
+
+    // --- Determine the port ---
+    const int port = resolve_port(argc, argv);
+    if (port <= 0 || port > 65535) {
+        std::cerr << "Invalid port: " << port << "\n";
+        return 1;
+    }
+
+    // --- Start the HTTP server ---
+    dse::HttpServer server(service);
+    g_server.store(&server);
+
+    // Install signal handlers for clean shutdown
+    std::signal(SIGINT, signal_handler);
+    std::signal(SIGTERM, signal_handler);
+
+    std::thread server_thread([&server, port]() {
+        if (!server.listen(port)) {
+            std::cerr << "Failed to start server on port " << port << "\n";
+            g_server.store(nullptr);
+            return;
+        }
+    });
+
+    server.wait_until_ready();
+    const int actual_port = server.port();
+
+    std::cout << "Server listening on http://127.0.0.1:" << actual_port << "\n";
+    std::cout << "Try: curl \"http://127.0.0.1:" << actual_port
+              << "/search?q=quick+fox\"\n";
+    std::cout << "\nPress Ctrl+C to stop.\n";
+
+    // --- Wait for shutdown ---
+    server_thread.join();
+    g_server.store(nullptr);
+
+    std::cout << "\nServer stopped.\n";
     return 0;
 }
