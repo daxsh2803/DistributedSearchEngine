@@ -1,8 +1,7 @@
-// Distributed Search Engine - Application Entry Point (Phase 5B-3).
+// Distributed Search Engine - Application Entry Point (Phase 6B-2).
 //
-// Starts the HTTP search server with a small deterministic seed corpus.
-// The seed corpus is temporary bootstrap data for Phase 5.
-// Document ingestion through an API is deferred to a later phase.
+// Starts the HTTP server with a small deterministic seed corpus loaded
+// through IngestionService. Supports document ingestion via POST /documents.
 //
 // Port configuration (first match wins):
 //   1. --port <number>   command-line argument
@@ -11,7 +10,9 @@
 //
 // Shutdown: press Ctrl+C (SIGINT) or send SIGTERM.
 
+#include "document_store.h"
 #include "http_server.h"
+#include "ingestion_service.h"
 #include "inverted_index.h"
 #include "search_service.h"
 #include "tokenizer.h"
@@ -39,10 +40,12 @@ void signal_handler(int /*signum*/)
 }
 
 // ---------------------------------------------------------------------------
-// Seed corpus — small, deterministic demo data for Phase 5.
+// Seed corpus — small, deterministic demo data for Phase 6.
+// Loaded through IngestionService so both DocumentStore and InvertedIndex
+// are populated consistently.
 // ---------------------------------------------------------------------------
 
-void load_seed_corpus(dse::InvertedIndex& index)
+void load_seed_corpus(dse::IngestionService& ingestion)
 {
     struct Doc {
         dse::doc_id id;
@@ -73,7 +76,7 @@ void load_seed_corpus(dse::InvertedIndex& index)
     };
 
     for (const auto& doc : docs) {
-        index.add_document(doc.id, doc.text);
+        ingestion.ingest({doc.id, std::string(doc.text)});
     }
 }
 
@@ -119,17 +122,21 @@ int resolve_port(int argc, char* argv[])
 
 int main(int argc, char* argv[])
 {
-    std::cout << "Distributed Search Engine | Phase 5 - Search API\n";
+    std::cout << "Distributed Search Engine | Phase 6 - Document Ingestion\n";
     std::cout << "Built with C++ standard: " << __cplusplus << "\n\n";
 
-    // --- Build the search index with seed data ---
+    // --- Create storage components ---
     dse::InvertedIndex index;
-    load_seed_corpus(index);
-    std::cout << "Loaded " << index.document_count() << " seed documents ("
-              << index.term_count() << " distinct terms)\n";
+    dse::DocumentStore store;
 
     // --- Create the service layer ---
-    const dse::SearchService service(index);
+    dse::IngestionService ingestion(index, store);
+    const dse::SearchService search(index);
+
+    // --- Load seed corpus through IngestionService ---
+    load_seed_corpus(ingestion);
+    std::cout << "Loaded " << index.document_count() << " seed documents ("
+              << index.term_count() << " distinct terms)\n";
 
     // --- Determine the port ---
     const int port = resolve_port(argc, argv);
@@ -139,7 +146,7 @@ int main(int argc, char* argv[])
     }
 
     // --- Start the HTTP server ---
-    dse::HttpServer server(service);
+    dse::HttpServer server(search, ingestion);
     g_server.store(&server);
 
     // Install signal handlers for clean shutdown

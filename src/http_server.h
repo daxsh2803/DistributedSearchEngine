@@ -29,10 +29,12 @@ class Server;
 namespace dse {
 
 class SearchService;
+class IngestionService;
 
 class HttpServer {
 public:
-    explicit HttpServer(const SearchService& service);
+    HttpServer(const SearchService& search,
+               IngestionService& ingestion);
     ~HttpServer();
 
     HttpServer(const HttpServer&) = delete;
@@ -56,7 +58,8 @@ public:
 private:
     void register_routes();
 
-    const SearchService& service_;
+    const SearchService& search_;
+    IngestionService& ingestion_;
     std::unique_ptr<httplib::Server> server_;
     int port_ = 0;
 };

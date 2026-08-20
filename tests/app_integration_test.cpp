@@ -6,7 +6,9 @@
 
 #include <gtest/gtest.h>
 
+#include "document_store.h"
 #include "http_server.h"
+#include "ingestion_service.h"
 #include "inverted_index.h"
 #include "search_service.h"
 #include "tokenizer.h"
@@ -22,6 +24,8 @@
 
 namespace {
 
+using dse::DocumentStore;
+using dse::IngestionService;
 using dse::InvertedIndex;
 using dse::SearchService;
 using dse::doc_id;
@@ -68,7 +72,8 @@ protected:
     void SetUp() override {
         load_seed_corpus(index_);
         service_ = std::make_unique<SearchService>(index_);
-        server_  = std::make_unique<dse::HttpServer>(*service_);
+        ingestion_ = std::make_unique<IngestionService>(index_, store_);
+        server_  = std::make_unique<dse::HttpServer>(*service_, *ingestion_);
     }
 
     void start_server() {
@@ -94,8 +99,22 @@ protected:
         return {res->status, res->body};
     }
 
+    std::pair<int, std::string> post(const std::string& path,
+                                     const std::string& json_body) {
+        httplib::Client client("localhost", server_->port());
+        client.set_connection_timeout(5);
+        client.set_read_timeout(5);
+        auto res = client.Post(path.c_str(),
+                               json_body.c_str(),
+                               "application/json");
+        if (!res) return {0, ""};
+        return {res->status, res->body};
+    }
+
     InvertedIndex index_;
+    DocumentStore store_;
     std::unique_ptr<SearchService> service_;
+    std::unique_ptr<IngestionService> ingestion_;
     std::unique_ptr<dse::HttpServer> server_;
     std::thread server_thread_;
 };
@@ -190,6 +209,94 @@ TEST_F(AppIntegrationTest, ApplicationStartsAndServes)
     const auto [status, body] = get("/search?q=engine");
     EXPECT_EQ(status, 200);
     EXPECT_FALSE(body.empty());
+}
+
+// ===========================================================================
+// 6. POST /documents ingestion via HTTP
+// ===========================================================================
+
+TEST_F(AppIntegrationTest, DocumentIngestionViaHTTP)
+{
+    start_server();
+
+    // Ingest a new document via POST /documents
+    const auto [s1, b1] = post(
+        "/documents",
+        R"({"id": 100, "content": "phase six ingestion test"})");
+    EXPECT_EQ(s1, 201);
+
+    const auto j1 = nlohmann::json::parse(b1);
+    EXPECT_EQ(j1["document_id"], 100u);
+    EXPECT_GE(j1["terms_indexed"].get<std::size_t>(), 1u);
+}
+
+// ===========================================================================
+// 7. End-to-end: ingest → search round-trip
+// ===========================================================================
+
+TEST_F(AppIntegrationTest, IngestThenSearchRoundTrip)
+{
+    start_server();
+
+    // Ingest a document with a unique term that won't match seed corpus
+    const auto [s1, b1] = post(
+        "/documents",
+        R"({"id": 200, "content": "xyzzy plugh"})");
+    EXPECT_EQ(s1, 201);
+
+    // Search for that unique term — should find exactly doc 200
+    const auto [s2, b2] = get("/search?q=xyzzy");
+    EXPECT_EQ(s2, 200);
+
+    const auto j2 = nlohmann::json::parse(b2);
+    EXPECT_EQ(j2["total"], 1u);
+    EXPECT_EQ(j2["results"][0]["document_id"], 200u);
+}
+
+// ===========================================================================
+// 8. POST /documents duplicate returns 409
+// ===========================================================================
+
+TEST_F(AppIntegrationTest, DuplicateDocumentIngestionReturns409)
+{
+    start_server();
+
+    // First ingestion succeeds
+    const auto [s1, b1] = post(
+        "/documents",
+        R"({"id": 300, "content": "first ingestion"})");
+    EXPECT_EQ(s1, 201);
+
+    // Duplicate returns 409
+    const auto [s2, b2] = post(
+        "/documents",
+        R"({"id": 300, "content": "second ingestion"})");
+    EXPECT_EQ(s2, 409);
+}
+
+// ===========================================================================
+// 9. Existing search behavior preserved after ingestion
+// ===========================================================================
+
+TEST_F(AppIntegrationTest, ExistingSearchPreservedAfterIngestion)
+{
+    start_server();
+
+    // Ingest a new document
+    post("/documents",
+         R"({"id": 500, "content": "brand new content"})");
+
+    // Original seed corpus search still works
+    const auto [s1, b1] = get("/search?q=fox&mode=or");
+    EXPECT_EQ(s1, 200);
+    const auto j1 = nlohmann::json::parse(b1);
+    EXPECT_GE(j1["total"].get<std::size_t>(), 2u);
+
+    // AND mode still works — doc 1 (quick brown fox) and doc 3 (quick brown dog...lazy fox)
+    const auto [s2, b2] = get("/search?q=quick+fox&mode=and");
+    EXPECT_EQ(s2, 200);
+    const auto j2 = nlohmann::json::parse(b2);
+    EXPECT_EQ(j2["total"], 2u);  // docs 1 and 3 both have "quick" and "fox"
 }
 
 } // namespace

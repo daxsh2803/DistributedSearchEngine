@@ -64,7 +64,9 @@ add_library(dse_core STATIC
     src/query_processor.cpp
     src/ranker.cpp
     src/search_service.cpp
-    src/http_server.cpp)
+    src/http_server.cpp
+    src/document_store.cpp
+    src/ingestion_service.cpp)
 target_include_directories(dse_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_options(dse_core PRIVATE ${PROJECT_WARNINGS})
 target_link_libraries(dse_core PUBLIC httplib::httplib nlohmann_json::nlohmann_json)
@@ -127,6 +129,14 @@ if(BUILD_TESTING)
     target_compile_options(app_integration_test PRIVATE ${PROJECT_WARNINGS})
     target_link_libraries(app_integration_test PRIVATE GTest::gtest_main dse_core)
 
+    add_executable(document_store_test tests/document_store_test.cpp)
+    target_compile_options(document_store_test PRIVATE ${PROJECT_WARNINGS})
+    target_link_libraries(document_store_test PRIVATE GTest::gtest_main dse_core)
+
+    add_executable(ingestion_service_test tests/ingestion_service_test.cpp)
+    target_compile_options(ingestion_service_test PRIVATE ${PROJECT_WARNINGS})
+    target_link_libraries(ingestion_service_test PRIVATE GTest::gtest_main dse_core)
+
     include(GoogleTest)
     gtest_discover_tests(smoke_test)
     gtest_discover_tests(tokenizer_test)
@@ -136,4 +146,6 @@ if(BUILD_TESTING)
     gtest_discover_tests(search_service_test)
     gtest_discover_tests(http_api_test)
     gtest_discover_tests(app_integration_test)
+    gtest_discover_tests(document_store_test)
+    gtest_discover_tests(ingestion_service_test)
 endif()

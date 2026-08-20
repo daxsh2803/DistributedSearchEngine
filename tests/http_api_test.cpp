@@ -12,7 +12,9 @@
 
 #include <gtest/gtest.h>
 
+#include "document_store.h"
 #include "http_server.h"
+#include "ingestion_service.h"
 #include "inverted_index.h"
 #include "ranker.h"
 #include "search_service.h"
@@ -30,6 +32,8 @@
 
 namespace {
 
+using dse::DocumentStore;
+using dse::IngestionService;
 using dse::InvertedIndex;
 using dse::SearchMode;
 using dse::SearchService;
@@ -57,7 +61,9 @@ protected:
             {4, "the fox and the dog"},
         });
         service_ = std::make_unique<SearchService>(index_);
-        server_  = std::make_unique<dse::HttpServer>(*service_);
+        // IngestionService is not used in these tests but required by HttpServer
+        ingestion_ = std::make_unique<IngestionService>(index_, store_);
+        server_  = std::make_unique<dse::HttpServer>(*service_, *ingestion_);
     }
 
     void start_server() {
@@ -87,8 +93,25 @@ protected:
         return {res->status, res->body};
     }
 
+    // Convenience: make a POST request with a JSON body.
+    std::pair<int, std::string> post(const std::string& path,
+                                     const std::string& json_body) {
+        httplib::Client client("localhost", server_->port());
+        client.set_connection_timeout(5);
+        client.set_read_timeout(5);
+        auto res = client.Post(path.c_str(),
+                               json_body.c_str(),
+                               "application/json");
+        if (!res) {
+            return {0, ""};
+        }
+        return {res->status, res->body};
+    }
+
     InvertedIndex index_;
+    DocumentStore store_;
     std::unique_ptr<SearchService> service_;
+    std::unique_ptr<dse::IngestionService> ingestion_;
     std::unique_ptr<dse::HttpServer> server_;
     std::thread server_thread_;
 };
@@ -423,6 +446,255 @@ TEST_F(HttpApiTest, DocumentIdsAreUnsignedIntegers)
     for (const auto& r : j["results"]) {
         EXPECT_TRUE(r["document_id"].is_number_unsigned());
     }
+}
+
+// ===========================================================================
+// POST /documents — Phase 6 Ingestion Integration Tests
+// ===========================================================================
+
+// ===========================================================================
+// 19. Valid document ingestion returns 201
+// ===========================================================================
+
+TEST_F(HttpApiTest, ValidDocumentIngestionReturns201)
+{
+    start_server();
+    const auto [status, body] = post(
+        "/documents",
+        R"({"id": 100, "content": "The quick brown fox"})");
+
+    EXPECT_EQ(status, 201);
+
+    const auto j = nlohmann::json::parse(body);
+    EXPECT_EQ(j["document_id"], 100u);
+    EXPECT_GE(j["terms_indexed"].get<std::size_t>(), 1u);
+}
+
+// ===========================================================================
+// 20. Ingested document is immediately searchable
+// ===========================================================================
+
+TEST_F(HttpApiTest, IngestedDocumentIsImmediatelySearchable)
+{
+    start_server();
+
+    // Ingest a unique document
+    const auto [ingest_status, ingest_body] = post(
+        "/documents",
+        R"({"id": 200, "content": "unique_term_xyz"})");
+    EXPECT_EQ(ingest_status, 201);
+
+    // Search for the unique term — should find exactly doc 200
+    const auto [search_status, search_body] = get("/search?q=unique_term_xyz");
+    EXPECT_EQ(search_status, 200);
+
+    const auto j = nlohmann::json::parse(search_body);
+    EXPECT_EQ(j["total"], 1u);
+    EXPECT_EQ(j["results"][0]["document_id"], 200u);
+    EXPECT_GT(j["results"][0]["score"].get<double>(), 0.0);
+}
+
+// ===========================================================================
+// 21. Duplicate document ID returns 409
+// ===========================================================================
+
+TEST_F(HttpApiTest, DuplicateDocumentIdReturns409)
+{
+    start_server();
+
+    // First ingestion — should succeed
+    const auto [s1, b1] = post(
+        "/documents",
+        R"({"id": 300, "content": "original content"})");
+    EXPECT_EQ(s1, 201);
+
+    // Second ingestion with same ID — should return 409
+    const auto [s2, b2] = post(
+        "/documents",
+        R"({"id": 300, "content": "attempted overwrite"})");
+    EXPECT_EQ(s2, 409);
+
+    const auto j = nlohmann::json::parse(b2);
+    EXPECT_TRUE(j.contains("error"));
+}
+
+// ===========================================================================
+// 22. Duplicate ingestion does not modify index
+// ===========================================================================
+
+TEST_F(HttpApiTest, DuplicateIngestionDoesNotModifyIndex)
+{
+    start_server();
+
+    // Ingest document with known content
+    post("/documents",
+         R"({"id": 400, "content": "alpha beta"})");
+
+    // Search for "alpha" — should find doc 400
+    const auto [s1, b1] = get("/search?q=alpha");
+    const auto j1 = nlohmann::json::parse(b1);
+    EXPECT_EQ(j1["total"], 1u);
+    EXPECT_EQ(j1["results"][0]["document_id"], 400u);
+
+    // Attempt duplicate ingestion
+    post("/documents",
+         R"({"id": 400, "content": "completely different"})");
+
+    // Search for original content still works
+    const auto [s2, b2] = get("/search?q=alpha");
+    const auto j2 = nlohmann::json::parse(b2);
+    EXPECT_EQ(j2["total"], 1u);
+    EXPECT_EQ(j2["results"][0]["document_id"], 400u);
+
+    // Search for new content does NOT find it
+    const auto [s3, b3] = get("/search?q=completely");
+    const auto j3 = nlohmann::json::parse(b3);
+    EXPECT_EQ(j3["total"], 0u);
+}
+
+// ===========================================================================
+// 23. Empty content returns 400
+// ===========================================================================
+
+TEST_F(HttpApiTest, EmptyContentReturns400)
+{
+    start_server();
+    const auto [status, body] = post(
+        "/documents",
+        R"({"id": 500, "content": ""})");
+
+    EXPECT_EQ(status, 400);
+
+    const auto j = nlohmann::json::parse(body);
+    EXPECT_TRUE(j.contains("error"));
+}
+
+// ===========================================================================
+// 24. Whitespace-only content returns 400
+// ===========================================================================
+
+TEST_F(HttpApiTest, WhitespaceOnlyContentReturns400)
+{
+    start_server();
+    const auto [status, body] = post(
+        "/documents",
+        R"({"id": 600, "content": "   \t\n  "})");
+
+    EXPECT_EQ(status, 400);
+
+    const auto j = nlohmann::json::parse(body);
+    EXPECT_TRUE(j.contains("error"));
+}
+
+// ===========================================================================
+// 25. Malformed JSON returns 400
+// ===========================================================================
+
+TEST_F(HttpApiTest, MalformedJsonReturns400)
+{
+    start_server();
+    const auto [status, body] = post(
+        "/documents",
+        R"({invalid json})");
+
+    EXPECT_EQ(status, 400);
+
+    const auto j = nlohmann::json::parse(body);
+    EXPECT_TRUE(j.contains("error"));
+}
+
+// ===========================================================================
+// 26. Missing id field returns 400
+// ===========================================================================
+
+TEST_F(HttpApiTest, MissingIdFieldReturns400)
+{
+    start_server();
+    const auto [status, body] = post(
+        "/documents",
+        R"({"content": "some text"})");
+
+    EXPECT_EQ(status, 400);
+
+    const auto j = nlohmann::json::parse(body);
+    EXPECT_TRUE(j.contains("error"));
+}
+
+// ===========================================================================
+// 27. Missing content field returns 400
+// ===========================================================================
+
+TEST_F(HttpApiTest, MissingContentFieldReturns400)
+{
+    start_server();
+    const auto [status, body] = post(
+        "/documents",
+        R"({"id": 700})");
+
+    EXPECT_EQ(status, 400);
+
+    const auto j = nlohmann::json::parse(body);
+    EXPECT_TRUE(j.contains("error"));
+}
+
+// ===========================================================================
+// 28. Invalid document ID (negative) returns 400
+// ===========================================================================
+
+TEST_F(HttpApiTest, NegativeDocumentIdReturns400)
+{
+    start_server();
+    const auto [status, body] = post(
+        "/documents",
+        R"({"id": -1, "content": "test"})");
+
+    EXPECT_EQ(status, 400);
+
+    const auto j = nlohmann::json::parse(body);
+    EXPECT_TRUE(j.contains("error"));
+}
+
+// ===========================================================================
+// 29. Existing Phase 5 search behavior remains unchanged after ingestion
+// ===========================================================================
+
+TEST_F(HttpApiTest, SearchBehaviorUnchangedAfterIngestion)
+{
+    start_server();
+
+    // Ingest a document
+    post("/documents",
+         R"({"id": 800, "content": "new searchable document"})");
+
+    // Verify original index still works correctly
+    const auto [s1, b1] = get("/search?q=fox");
+    EXPECT_EQ(s1, 200);
+    const auto j1 = nlohmann::json::parse(b1);
+    EXPECT_EQ(j1["total"], 2u);  // original docs 1 and 4
+
+    // AND mode still works
+    const auto [s2, b2] = get("/search?q=quick+fox&mode=and");
+    EXPECT_EQ(s2, 200);
+    const auto j2 = nlohmann::json::parse(b2);
+    EXPECT_EQ(j2["total"], 1u);  // only doc 1
+}
+
+// ===========================================================================
+// 30. Response content type is application/json for ingestion
+// ===========================================================================
+
+TEST_F(HttpApiTest, IngestionResponseContentTypeIsJson)
+{
+    start_server();
+    httplib::Client client("localhost", server_->port());
+
+    auto res = client.Post("/documents",
+                           R"({"id": 900, "content": "test"})",
+                           "application/json");
+    ASSERT_TRUE(res);
+    EXPECT_EQ(res->status, 201);
+    EXPECT_NE(res->get_header_value("Content-Type").find("application/json"),
+              std::string::npos);
 }
 
 } // namespace
