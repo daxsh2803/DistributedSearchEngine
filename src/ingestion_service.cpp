@@ -1,4 +1,4 @@
-// Distributed Search Engine - Ingestion Service (Phase 6B-2).
+// Distributed Search Engine - Ingestion Service (Phase 6B-2, 7A-2).
 //
 // Implementation of the contract in src/ingestion_service.h:
 //   - validate request fields (id, content);
@@ -6,6 +6,7 @@
 //   - reject empty/whitespace-only content;
 //   - store raw text in DocumentStore;
 //   - index tokens via InvertedIndex;
+//   - persist DocumentStore to disk if data_path_ is configured;
 //   - report the number of distinct terms indexed.
 
 #include "ingestion_service.h"
@@ -38,6 +39,14 @@ bool is_blank(const std::string& s)
 IngestionService::IngestionService(InvertedIndex& index, DocumentStore& store)
     : index_(index)
     , store_(store)
+{
+}
+
+IngestionService::IngestionService(InvertedIndex& index, DocumentStore& store,
+                                   const std::string& data_path)
+    : index_(index)
+    , store_(store)
+    , data_path_(data_path)
 {
 }
 
@@ -92,6 +101,18 @@ IngestDocumentResponse IngestionService::ingest(
 
     // Index the document in the InvertedIndex.
     index_.add_document(request.id, request.content);
+
+    // Persist to disk if persistence is configured.
+    // If persistence fails, report error — the in-memory state is
+    // correct but the document may not survive a restart.
+    if (!data_path_.empty()) {
+        if (!store_.save(data_path_)) {
+            response.is_error = true;
+            response.error_message =
+                "Document indexed but failed to persist to disk";
+            return response;
+        }
+    }
 
     response.terms_indexed = distinct_terms.size();
     return response;

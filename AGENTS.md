@@ -78,28 +78,21 @@ Before making major changes, inspect the current repository state.
 
 ## Current Project Phase
 
-PHASE 5 — Search API: COMPLETE
+PHASE 7 — Document Persistence: COMPLETE
 
-Phase 5A — Design and Learning: COMPLETE
-Phase 5B-1 — SearchService: COMPLETE
-Phase 5B-2 — HTTP Server + HTTP API Tests: COMPLETE
-Phase 5B-3 — Application Integration: COMPLETE
+Phase 7A-1 — DocumentStore Persistence: COMPLETE
+Phase 7A-2 — Startup Recovery + Index Rebuild: COMPLETE
 
-Phase 5 is fully implemented and verified (244/244 tests passing).
+Phase 7 is fully implemented and verified (333/333 tests passing).
 
 Do not implement later search-engine functionality such as:
-- document ingestion API
-- persistence
-- caching
-- authentication
-- rate limiting
-- Docker/deployment
-- distributed querying
-
-The next development phase is Phase 6 — Document Ingestion.
-
-Do not implement later search-engine functionality such as:
-- persistence
-- sharding
+- inverted-index persistence
+- async persistence
+- WAL
+- database storage
+- distributed storage
 - replication
-- distributed coordination
+- sharding
+- concurrency
+
+The next development phase is Phase 8 (to be determined).

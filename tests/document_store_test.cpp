@@ -1,9 +1,9 @@
-// Distributed Search Engine - Document Store tests (Phase 6B-1).
+// Distributed Search Engine - Document Store tests (Phase 6B-1, 7A-1).
 //
 // Tests for dse::DocumentStore covering: basic add/get, contains,
 // missing documents, size tracking, multiple documents, duplicate
 // ID rejection, duplicate does not overwrite, doc_id 0, empty content,
-// long content, and deterministic behavior.
+// long content, deterministic behavior, and JSONL persistence.
 
 #include <gtest/gtest.h>
 
@@ -11,6 +11,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <fstream>
 #include <string>
 #include <string_view>
 
@@ -18,6 +20,26 @@ namespace {
 
 using dse::Document;
 using dse::DocumentStore;
+
+// Helper: create a unique temporary file path for tests.
+std::string temp_path(const std::string& name)
+{
+    return std::tmpnam(nullptr) + std::string("_") + name + ".jsonl";
+}
+
+// Helper: read entire file as a string.
+std::string read_file(const std::string& path)
+{
+    std::ifstream ifs(path);
+    return std::string(std::istreambuf_iterator<char>(ifs),
+                       std::istreambuf_iterator<char>());
+}
+
+// RAII helper: removes a file on destruction.
+struct TempFile {
+    std::string path;
+    ~TempFile() { std::remove(path.c_str()); }
+};
 
 } // namespace
 
@@ -287,4 +309,545 @@ TEST(DocumentStoreEdgeCases, ContentWithSpecialCharacters)
     const auto doc = store.get(1);
     ASSERT_TRUE(doc.has_value());
     EXPECT_EQ(doc->content, content);
+}
+
+// ===========================================================================
+// Phase 7A-1: JSONL Persistence Tests
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// 20. Save/load round trip
+// ---------------------------------------------------------------------------
+
+TEST(DocumentStorePersistence, SaveLoadRoundTrip)
+{
+    const auto path = temp_path("roundtrip");
+    TempFile guard{path};
+
+    DocumentStore store;
+    store.add({1, "hello world"});
+    store.add({2, "foo bar"});
+
+    EXPECT_TRUE(store.save(path));
+
+    DocumentStore loaded;
+    EXPECT_TRUE(loaded.load(path));
+    EXPECT_EQ(loaded.size(), 2u);
+
+    const auto d1 = loaded.get(1);
+    ASSERT_TRUE(d1.has_value());
+    EXPECT_EQ(d1->content, "hello world");
+
+    const auto d2 = loaded.get(2);
+    ASSERT_TRUE(d2.has_value());
+    EXPECT_EQ(d2->content, "foo bar");
+}
+
+// ---------------------------------------------------------------------------
+// 21. Multiple documents
+// ---------------------------------------------------------------------------
+
+TEST(DocumentStorePersistence, MultipleDocuments)
+{
+    const auto path = temp_path("multi");
+    TempFile guard{path};
+
+    DocumentStore store;
+    store.add({1, "alpha"});
+    store.add({2, "beta"});
+    store.add({3, "gamma"});
+    store.add({100, "delta"});
+
+    EXPECT_TRUE(store.save(path));
+
+    DocumentStore loaded;
+    EXPECT_TRUE(loaded.load(path));
+    EXPECT_EQ(loaded.size(), 4u);
+    EXPECT_EQ(loaded.get(1)->content, "alpha");
+    EXPECT_EQ(loaded.get(2)->content, "beta");
+    EXPECT_EQ(loaded.get(3)->content, "gamma");
+    EXPECT_EQ(loaded.get(100)->content, "delta");
+}
+
+// ---------------------------------------------------------------------------
+// 22. doc_id = 0
+// ---------------------------------------------------------------------------
+
+TEST(DocumentStorePersistence, DocIdZero)
+{
+    const auto path = temp_path("zero");
+    TempFile guard{path};
+
+    DocumentStore store;
+    store.add({0, "zero doc"});
+    store.add({1, "one doc"});
+
+    EXPECT_TRUE(store.save(path));
+
+    DocumentStore loaded;
+    EXPECT_TRUE(loaded.load(path));
+    EXPECT_EQ(loaded.size(), 2u);
+
+    const auto d0 = loaded.get(0);
+    ASSERT_TRUE(d0.has_value());
+    EXPECT_EQ(d0->content, "zero doc");
+}
+
+// ---------------------------------------------------------------------------
+// 23. Non-contiguous IDs
+// ---------------------------------------------------------------------------
+
+TEST(DocumentStorePersistence, NonContiguousIds)
+{
+    const auto path = temp_path("noncontig");
+    TempFile guard{path};
+
+    DocumentStore store;
+    store.add({5, "five"});
+    store.add({100, "hundred"});
+    store.add({1, "one"});
+    store.add({999, "nine-nine-nine"});
+
+    EXPECT_TRUE(store.save(path));
+
+    DocumentStore loaded;
+    EXPECT_TRUE(loaded.load(path));
+    EXPECT_EQ(loaded.size(), 4u);
+    EXPECT_TRUE(loaded.contains(5));
+    EXPECT_TRUE(loaded.contains(100));
+    EXPECT_TRUE(loaded.contains(1));
+    EXPECT_TRUE(loaded.contains(999));
+}
+
+// ---------------------------------------------------------------------------
+// 24. Empty content
+// ---------------------------------------------------------------------------
+
+TEST(DocumentStorePersistence, EmptyContent)
+{
+    const auto path = temp_path("emptycontent");
+    TempFile guard{path};
+
+    DocumentStore store;
+    store.add({1, ""});
+    store.add({2, "not empty"});
+
+    EXPECT_TRUE(store.save(path));
+
+    DocumentStore loaded;
+    EXPECT_TRUE(loaded.load(path));
+    EXPECT_EQ(loaded.size(), 2u);
+    EXPECT_EQ(loaded.get(1)->content, "");
+    EXPECT_EQ(loaded.get(2)->content, "not empty");
+}
+
+// ---------------------------------------------------------------------------
+// 25. Special characters / JSON escaping
+// ---------------------------------------------------------------------------
+
+TEST(DocumentStorePersistence, SpecialCharactersJsonEscaping)
+{
+    const auto path = temp_path("escaping");
+    TempFile guard{path};
+
+    const std::string content =
+        "Line1\nLine2\tTabbed \"quoted\" 'single' back\\slash";
+
+    DocumentStore store;
+    store.add({1, content});
+
+    EXPECT_TRUE(store.save(path));
+
+    DocumentStore loaded;
+    EXPECT_TRUE(loaded.load(path));
+    const auto doc = loaded.get(1);
+    ASSERT_TRUE(doc.has_value());
+    EXPECT_EQ(doc->content, content);
+}
+
+// ---------------------------------------------------------------------------
+// 26. Long content
+// ---------------------------------------------------------------------------
+
+TEST(DocumentStorePersistence, LongContent)
+{
+    const auto path = temp_path("longcontent");
+    TempFile guard{path};
+
+    std::string long_content(50'000, 'x');
+
+    DocumentStore store;
+    store.add({1, long_content});
+
+    EXPECT_TRUE(store.save(path));
+
+    DocumentStore loaded;
+    EXPECT_TRUE(loaded.load(path));
+    const auto doc = loaded.get(1);
+    ASSERT_TRUE(doc.has_value());
+    EXPECT_EQ(doc->content.size(), 50'000u);
+    EXPECT_EQ(doc->content, long_content);
+}
+
+// ---------------------------------------------------------------------------
+// 27. Save creates file
+// ---------------------------------------------------------------------------
+
+TEST(DocumentStorePersistence, SaveCreatesFile)
+{
+    const auto path = temp_path("createsfile");
+    TempFile guard{path};
+
+    DocumentStore store;
+    store.add({1, "test"});
+
+    EXPECT_TRUE(store.save(path));
+
+    // Verify file exists and is non-empty.
+    std::ifstream ifs(path);
+    EXPECT_TRUE(ifs.is_open());
+    std::string file_content((std::istreambuf_iterator<char>(ifs)),
+                             std::istreambuf_iterator<char>());
+    EXPECT_FALSE(file_content.empty());
+}
+
+// ---------------------------------------------------------------------------
+// 28. Save overwrites existing file
+// ---------------------------------------------------------------------------
+
+TEST(DocumentStorePersistence, SaveOverwritesExistingFile)
+{
+    const auto path = temp_path("overwrite");
+    TempFile guard{path};
+
+    // Write initial content.
+    {
+        std::ofstream ofs(path);
+        ofs << "old content that should be replaced";
+    }
+
+    DocumentStore store;
+    store.add({1, "new"});
+    EXPECT_TRUE(store.save(path));
+
+    // File should contain only the new JSONL, not the old content.
+    const auto content = read_file(path);
+    EXPECT_EQ(content.find("old content"), std::string::npos);
+    EXPECT_NE(content.find("new"), std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// 29. Missing file (load returns false, store unchanged)
+// ---------------------------------------------------------------------------
+
+TEST(DocumentStorePersistence, MissingFileReturnsFalse)
+{
+    DocumentStore store;
+    store.add({1, "existing"});
+
+    // Try to load from a file that does not exist.
+    EXPECT_FALSE(store.load("/nonexistent/path/to/file.jsonl"));
+
+    // Existing store must be unchanged.
+    EXPECT_EQ(store.size(), 1u);
+    const auto doc = store.get(1);
+    ASSERT_TRUE(doc.has_value());
+    EXPECT_EQ(doc->content, "existing");
+}
+
+// ---------------------------------------------------------------------------
+// 30. Malformed JSON line
+// ---------------------------------------------------------------------------
+
+TEST(DocumentStorePersistence, MalformedJsonLineSkipped)
+{
+    const auto path = temp_path("malformed");
+    TempFile guard{path};
+
+    // Write a file with a mix of valid and invalid lines.
+    {
+        std::ofstream ofs(path);
+        ofs << "{\"id\": 1, \"content\": \"good\"}\n";
+        ofs << "this is not json\n";
+        ofs << "{\"id\": 2, \"content\": \"also good\"}\n";
+    }
+
+    DocumentStore store;
+    EXPECT_TRUE(store.load(path));  // returns true (file opened)
+    EXPECT_EQ(store.size(), 2u);    // only valid lines loaded
+    EXPECT_EQ(store.get(1)->content, "good");
+    EXPECT_EQ(store.get(2)->content, "also good");
+}
+
+// ---------------------------------------------------------------------------
+// 31. Missing id field
+// ---------------------------------------------------------------------------
+
+TEST(DocumentStorePersistence, MissingIdFieldSkipped)
+{
+    const auto path = temp_path("noid");
+    TempFile guard{path};
+
+    {
+        std::ofstream ofs(path);
+        ofs << "{\"content\": \"no id\"}\n";
+        ofs << "{\"id\": 1, \"content\": \"valid\"}\n";
+    }
+
+    DocumentStore store;
+    EXPECT_TRUE(store.load(path));
+    EXPECT_EQ(store.size(), 1u);
+    EXPECT_EQ(store.get(1)->content, "valid");
+}
+
+// ---------------------------------------------------------------------------
+// 32. Missing content field
+// ---------------------------------------------------------------------------
+
+TEST(DocumentStorePersistence, MissingContentFieldSkipped)
+{
+    const auto path = temp_path("nocontent");
+    TempFile guard{path};
+
+    {
+        std::ofstream ofs(path);
+        ofs << "{\"id\": 1}\n";
+        ofs << "{\"id\": 2, \"content\": \"valid\"}\n";
+    }
+
+    DocumentStore store;
+    EXPECT_TRUE(store.load(path));
+    EXPECT_EQ(store.size(), 1u);
+    EXPECT_EQ(store.get(2)->content, "valid");
+}
+
+// ---------------------------------------------------------------------------
+// 33. Wrong id type (string instead of unsigned int)
+// ---------------------------------------------------------------------------
+
+TEST(DocumentStorePersistence, WrongIdTypeSkipped)
+{
+    const auto path = temp_path("wrongidtype");
+    TempFile guard{path};
+
+    {
+        std::ofstream ofs(path);
+        ofs << "{\"id\": \"not a number\", \"content\": \"bad\"}\n";
+        ofs << "{\"id\": 1, \"content\": \"valid\"}\n";
+    }
+
+    DocumentStore store;
+    EXPECT_TRUE(store.load(path));
+    EXPECT_EQ(store.size(), 1u);
+    EXPECT_EQ(store.get(1)->content, "valid");
+}
+
+// ---------------------------------------------------------------------------
+// 34. Wrong content type (int instead of string)
+// ---------------------------------------------------------------------------
+
+TEST(DocumentStorePersistence, WrongContentTypeSkipped)
+{
+    const auto path = temp_path("wrongcontenttype");
+    TempFile guard{path};
+
+    {
+        std::ofstream ofs(path);
+        ofs << "{\"id\": 1, \"content\": 12345}\n";
+        ofs << "{\"id\": 2, \"content\": \"valid\"}\n";
+    }
+
+    DocumentStore store;
+    EXPECT_TRUE(store.load(path));
+    EXPECT_EQ(store.size(), 1u);
+    EXPECT_EQ(store.get(2)->content, "valid");
+}
+
+// ---------------------------------------------------------------------------
+// 35. Duplicate IDs in persisted file (first wins)
+// ---------------------------------------------------------------------------
+
+TEST(DocumentStorePersistence, DuplicateIdsInFileFirstWins)
+{
+    const auto path = temp_path("dupes");
+    TempFile guard{path};
+
+    {
+        std::ofstream ofs(path);
+        ofs << "{\"id\": 1, \"content\": \"first\"}\n";
+        ofs << "{\"id\": 1, \"content\": \"second\"}\n";
+    }
+
+    DocumentStore store;
+    EXPECT_TRUE(store.load(path));
+    EXPECT_EQ(store.size(), 1u);
+    EXPECT_EQ(store.get(1)->content, "first");
+}
+
+// ---------------------------------------------------------------------------
+// 36. Deterministic save ordering (sorted by doc_id)
+// ---------------------------------------------------------------------------
+
+TEST(DocumentStorePersistence, DeterministicSaveOrdering)
+{
+    // Insert in reverse order, then verify file is sorted by doc_id.
+    const auto path = temp_path("order");
+    TempFile guard{path};
+
+    DocumentStore store;
+    store.add({100, "hundred"});
+    store.add({1, "one"});
+    store.add({50, "fifty"});
+    store.add({10, "ten"});
+
+    EXPECT_TRUE(store.save(path));
+
+    const auto content = read_file(path);
+
+    // nlohmann::json::dump() produces compact JSON (no spaces after colons).
+    // Find positions of each ID in the file.
+    const auto pos1 = content.find("\"id\":1");
+    const auto pos10 = content.find("\"id\":10");
+    const auto pos50 = content.find("\"id\":50");
+    const auto pos100 = content.find("\"id\":100");
+
+    EXPECT_NE(pos1, std::string::npos);
+    EXPECT_NE(pos10, std::string::npos);
+    EXPECT_NE(pos50, std::string::npos);
+    EXPECT_NE(pos100, std::string::npos);
+
+    EXPECT_LT(pos1, pos10);
+    EXPECT_LT(pos10, pos50);
+    EXPECT_LT(pos50, pos100);
+}
+
+// ---------------------------------------------------------------------------
+// 37. all() exposes complete document set
+// ---------------------------------------------------------------------------
+
+TEST(DocumentStoreAll, AllReturnsCompleteMap)
+{
+    DocumentStore store;
+    store.add({1, "alpha"});
+    store.add({2, "beta"});
+    store.add({3, "gamma"});
+
+    const auto& docs = store.all();
+    EXPECT_EQ(docs.size(), 3u);
+    EXPECT_TRUE(docs.contains(1));
+    EXPECT_TRUE(docs.contains(2));
+    EXPECT_TRUE(docs.contains(3));
+    EXPECT_EQ(docs.at(1).content, "alpha");
+    EXPECT_EQ(docs.at(2).content, "beta");
+    EXPECT_EQ(docs.at(3).content, "gamma");
+}
+
+TEST(DocumentStoreAll, EmptyStoreAllReturnsEmptyMap)
+{
+    DocumentStore store;
+    const auto& docs = store.all();
+    EXPECT_TRUE(docs.empty());
+}
+
+// ---------------------------------------------------------------------------
+// 38. Existing store remains unchanged when load cannot open file
+// ---------------------------------------------------------------------------
+
+TEST(DocumentStorePersistence, ExistingStoreUnchangedOnLoadFailure)
+{
+    DocumentStore store;
+    store.add({1, "original"});
+    store.add({2, "preserved"});
+
+    EXPECT_FALSE(store.load("/definitely/does/not/exist.jsonl"));
+
+    EXPECT_EQ(store.size(), 2u);
+    EXPECT_EQ(store.get(1)->content, "original");
+    EXPECT_EQ(store.get(2)->content, "preserved");
+}
+
+// ---------------------------------------------------------------------------
+// 39. Mixed valid + malformed records
+// ---------------------------------------------------------------------------
+
+TEST(DocumentStorePersistence, MixedValidAndMalformedRecords)
+{
+    const auto path = temp_path("mixed");
+    TempFile guard{path};
+
+    {
+        std::ofstream ofs(path);
+        ofs << "{\"id\": 1, \"content\": \"good1\"}\n";
+        ofs << "not json at all\n";
+        ofs << "{\"id\": 2, \"content\": \"good2\"}\n";
+        ofs << "{}\n";  // empty object, missing both fields
+        ofs << "{\"id\": 3, \"content\": \"good3\"}\n";
+        ofs << "[1, 2, 3]\n";  // array, not object
+    }
+
+    DocumentStore store;
+    EXPECT_TRUE(store.load(path));
+    EXPECT_EQ(store.size(), 3u);
+    EXPECT_EQ(store.get(1)->content, "good1");
+    EXPECT_EQ(store.get(2)->content, "good2");
+    EXPECT_EQ(store.get(3)->content, "good3");
+}
+
+// ---------------------------------------------------------------------------
+// 40. Negative id (signed) is rejected
+// ---------------------------------------------------------------------------
+
+TEST(DocumentStorePersistence, NegativeIdTypeSkipped)
+{
+    const auto path = temp_path("negid");
+    TempFile guard{path};
+
+    {
+        std::ofstream ofs(path);
+        ofs << "{\"id\": -1, \"content\": \"negative\"}\n";
+        ofs << "{\"id\": 1, \"content\": \"valid\"}\n";
+    }
+
+    DocumentStore store;
+    EXPECT_TRUE(store.load(path));
+    EXPECT_EQ(store.size(), 1u);
+    EXPECT_EQ(store.get(1)->content, "valid");
+}
+
+// ---------------------------------------------------------------------------
+// 41. Save/load preserves content with newlines
+// ---------------------------------------------------------------------------
+
+TEST(DocumentStorePersistence, ContentWithNewlines)
+{
+    const auto path = temp_path("newlines");
+    TempFile guard{path};
+
+    const std::string content = "line1\nline2\nline3";
+
+    DocumentStore store;
+    store.add({1, content});
+
+    EXPECT_TRUE(store.save(path));
+
+    DocumentStore loaded;
+    EXPECT_TRUE(loaded.load(path));
+    EXPECT_EQ(loaded.get(1)->content, content);
+}
+
+// ---------------------------------------------------------------------------
+// 42. Save/load empty store (empty file)
+// ---------------------------------------------------------------------------
+
+TEST(DocumentStorePersistence, EmptyStoreSaveLoad)
+{
+    const auto path = temp_path("emptystore");
+    TempFile guard{path};
+
+    DocumentStore store;
+    EXPECT_TRUE(store.save(path));
+
+    DocumentStore loaded;
+    EXPECT_TRUE(loaded.load(path));
+    EXPECT_EQ(loaded.size(), 0u);
 }

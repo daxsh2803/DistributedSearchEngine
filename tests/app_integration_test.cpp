@@ -18,6 +18,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <fstream>
 #include <string>
 #include <thread>
 #include <chrono>
@@ -63,6 +65,15 @@ void load_seed_corpus(InvertedIndex& index)
 
     for (const auto& doc : docs) {
         index.add_document(doc.id, doc.text);
+    }
+}
+
+// Rebuild the InvertedIndex from DocumentStore.
+// Demonstrates that the index is derived state.
+void rebuild_index(InvertedIndex& index, const DocumentStore& store)
+{
+    for (const auto& [id, doc] : store.all()) {
+        index.add_document(id, doc.content);
     }
 }
 
@@ -300,3 +311,248 @@ TEST_F(AppIntegrationTest, ExistingSearchPreservedAfterIngestion)
 }
 
 } // namespace
+
+// ===========================================================================
+// Phase 7A-2: Persistence Integration Tests
+// ===========================================================================
+
+namespace {
+
+using dse::DocumentStore;
+using dse::IngestionService;
+using dse::InvertedIndex;
+using dse::SearchService;
+using dse::doc_id;
+
+// Helper: create a unique temporary file path for tests.
+std::string persist_temp_path(const std::string& name)
+{
+    return std::tmpnam(nullptr) + std::string("_") + name + ".jsonl";
+}
+
+// RAII helper: removes a file on destruction.
+struct PersistTempFile {
+    std::string path;
+    ~PersistTempFile() { std::remove(path.c_str()); }
+};
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+// 10. Startup with existing persistence file
+// ---------------------------------------------------------------------------
+
+TEST(PersistenceStartup, LoadedDocumentBecomesSearchable)
+{
+    const auto path = persist_temp_path("startup");
+    PersistTempFile guard{path};
+
+    // Phase 1: Ingest a unique document, let it persist.
+    {
+        InvertedIndex index;
+        DocumentStore store;
+        IngestionService ingestion(index, store, path);
+
+        // Ingest a unique document
+        const auto resp = ingestion.ingest({9000, "unique persistence test"});
+        EXPECT_FALSE(resp.is_error);
+
+        // Verify it's in the store
+        EXPECT_TRUE(store.contains(9000));
+    }
+    // Services destroyed here.
+
+    // Phase 2: Start fresh, load from persistence, rebuild index.
+    {
+        InvertedIndex index;
+        DocumentStore store;
+        EXPECT_TRUE(store.load(path));  // Load persisted documents
+        rebuild_index(index, store);     // Rebuild index from documents
+        const SearchService search(index);
+
+        // The persisted document should be searchable
+        EXPECT_EQ(store.size(), 1u);
+        EXPECT_EQ(index.document_count(), 1u);
+
+        const auto results = search.search({"unique", dse::SearchMode::Or, 10});
+        EXPECT_EQ(results.total, 1u);
+        EXPECT_EQ(results.results[0].document_id, 9000u);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 11. First run with missing file loads seed corpus
+// ---------------------------------------------------------------------------
+
+TEST(PersistenceStartup, MissingFileUsesSeedCorpus)
+{
+    const auto path = persist_temp_path("nofile");
+    // No guard — file doesn't exist
+
+    InvertedIndex index;
+    DocumentStore store;
+
+    // load() returns false when file doesn't exist
+    EXPECT_FALSE(store.load(path));
+
+    // Store should be empty
+    EXPECT_EQ(store.size(), 0u);
+
+    // Load seed corpus directly into the index
+    load_seed_corpus(index);
+
+    // Seed corpus loaded
+    EXPECT_EQ(index.document_count(), 20u);
+}
+
+// ---------------------------------------------------------------------------
+// 12. Newly ingested document survives restart
+// ---------------------------------------------------------------------------
+
+TEST(PersistenceStartup, IngestedDocumentSurvivesRestart)
+{
+    const auto path = persist_temp_path("survive");
+    PersistTempFile guard{path};
+
+    // Session 1: ingest a document
+    {
+        InvertedIndex index;
+        DocumentStore store;
+        IngestionService ingestion(index, store, path);
+        const SearchService search(index);
+
+        const auto resp = ingestion.ingest({7777, "survives the restart"});
+        EXPECT_FALSE(resp.is_error);
+    }
+
+    // Session 2: load from persistence
+    {
+        InvertedIndex index;
+        DocumentStore store;
+        EXPECT_TRUE(store.load(path));
+        rebuild_index(index, store);
+
+        EXPECT_TRUE(store.contains(7777));
+        const auto doc = store.get(7777);
+        ASSERT_TRUE(doc.has_value());
+        EXPECT_EQ(doc->content, "survives the restart");
+        EXPECT_EQ(index.document_count(), 1u);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 13. Malformed persistence records follow documented policy
+// ---------------------------------------------------------------------------
+
+TEST(PersistenceStartup, MalformedRecordsSkippedWithWarning)
+{
+    const auto path = persist_temp_path("malformed");
+    PersistTempFile guard{path};
+
+    // Write a file with some corrupt lines
+    {
+        std::ofstream ofs(path);
+        ofs << R"({"id": 1, "content": "good one"})" << "\n";
+        ofs << "this is not json\n";
+        ofs << R"({"id": 2, "content": "good two"})" << "\n";
+    }
+
+    InvertedIndex index;
+    DocumentStore store;
+
+    // load() returns true (file opened), even with corrupt lines
+    EXPECT_TRUE(store.load(path));
+
+    // Only valid records loaded
+    EXPECT_EQ(store.size(), 2u);
+    rebuild_index(index, store);
+    EXPECT_EQ(index.document_count(), 2u);
+}
+
+// ---------------------------------------------------------------------------
+// 14. Persistence failure does not return false success
+// ---------------------------------------------------------------------------
+
+TEST(PersistenceStartup, PersistenceFailureReportsError)
+{
+    InvertedIndex index;
+    DocumentStore store;
+
+    // Use a path that cannot be written to (invalid directory)
+    IngestionService ingestion(index, store, "/nonexistent/dir/file.jsonl");
+
+    const auto resp = ingestion.ingest({1, "test"});
+
+    // The document IS indexed in memory (best-effort)
+    EXPECT_TRUE(store.contains(1));
+    EXPECT_EQ(index.document_count(), 1u);
+
+    // But the response reports the persistence failure
+    EXPECT_TRUE(resp.is_error);
+    EXPECT_NE(resp.error_message.find("persist"), std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// 15. Existing Phase 5 search behavior remains intact
+// ---------------------------------------------------------------------------
+
+TEST(PersistenceStartup, SearchBehaviorUnchanged)
+{
+    const auto path = persist_temp_path("search");
+    PersistTempFile guard{path};
+
+    // Load seed corpus directly into the index
+    InvertedIndex index;
+    DocumentStore store;
+    load_seed_corpus(index);
+
+    // AND mode works
+    const SearchService search(index);
+    const auto r1 = search.search({"quick fox", dse::SearchMode::And, 10});
+    EXPECT_GE(r1.total, 1u);
+
+    // OR mode works
+    const auto r2 = search.search({"fox", dse::SearchMode::Or, 10});
+    EXPECT_GE(r2.total, 2u);
+}
+
+// ---------------------------------------------------------------------------
+// 16. Rebuild index from DocumentStore
+// ---------------------------------------------------------------------------
+
+TEST(PersistenceStartup, IndexRebuiltFromDocumentStore)
+{
+    const auto path = persist_temp_path("rebuild");
+    PersistTempFile guard{path};
+
+    // Create and persist some documents
+    {
+        InvertedIndex index;
+        DocumentStore store;
+        IngestionService ingestion(index, store, path);
+        ingestion.ingest({1, "alpha beta"});
+        ingestion.ingest({2, "beta gamma"});
+    }
+
+    // Create a fresh index and rebuild from loaded documents
+    {
+        InvertedIndex index;
+        DocumentStore store;
+        EXPECT_TRUE(store.load(path));
+
+        // Index is empty before rebuild
+        EXPECT_EQ(index.document_count(), 0u);
+
+        // Rebuild from DocumentStore
+        rebuild_index(index, store);
+
+        // Index now has the documents
+        EXPECT_EQ(index.document_count(), 2u);
+        EXPECT_EQ(index.term_count(), 3u);  // alpha, beta, gamma
+
+        // Search works
+        const SearchService search(index);
+        const auto results = search.search({"beta", dse::SearchMode::Or, 10});
+        EXPECT_EQ(results.total, 2u);
+    }
+}

@@ -2,12 +2,24 @@
 
 ## Current Phase
 
-Phase 5 — Search API: **COMPLETE**
+Phase 7 — Document Persistence: **COMPLETE**
 
-- Phase 5A — Design and Learning: **COMPLETE**
-- Phase 5B-1 — SearchService: **COMPLETE**
-- Phase 5B-2 — HTTP Server + API Tests: **COMPLETE**
-- Phase 5B-3 — Application Integration: **COMPLETE**
+- Phase 7A-1 — DocumentStore Persistence: **COMPLETE**
+- Phase 7A-2 — Startup Recovery + Index Rebuild: **COMPLETE**
+
+### Phase 7 Verification Results (actual, UCRT64 toolchain)
+
+- Build: **successful, zero warnings** (`-Wall -Wextra -Wpedantic`)
+- Tests: **333/333 passed (100%)**
+  - 31 HTTP API tests + 7 persistence startup tests + 9 app integration tests + 293 unit tests
+- Application: starts, loads persisted documents or seed corpus, serves HTTP, persists ingested documents
+
+## Completed: Phase 6
+
+Phase 6 — Document Ingestion: **COMPLETE**
+
+- Phase 6B-1 — DocumentStore: **COMPLETE**
+- Phase 6B-2 — IngestionService + POST /documents: **COMPLETE**
 
 ## Completed: Phase 1
 

@@ -1,12 +1,18 @@
-// Distributed Search Engine - Application Entry Point (Phase 6B-2).
+// Distributed Search Engine - Application Entry Point (Phase 7A-2).
 //
-// Starts the HTTP server with a small deterministic seed corpus loaded
-// through IngestionService. Supports document ingestion via POST /documents.
+// Starts the HTTP server with document persistence.
+// On startup, loads persisted documents and rebuilds the inverted index.
+// If no persistence file exists, loads a deterministic seed corpus.
 //
-// Port configuration (first match wins):
-//   1. --port <number>   command-line argument
-//   2. DSE_PORT=<number> environment variable
-//   3. default: 8080
+// Configuration (first match wins):
+//   Port:
+//     1. --port <number>   command-line argument
+//     2. DSE_PORT=<number> environment variable
+//     3. default: 8080
+//   Data path:
+//     1. --data <path>     command-line argument
+//     2. DSE_DATA=<path>   environment variable
+//     3. default: data/documents.jsonl
 //
 // Shutdown: press Ctrl+C (SIGINT) or send SIGTERM.
 
@@ -40,9 +46,8 @@ void signal_handler(int /*signum*/)
 }
 
 // ---------------------------------------------------------------------------
-// Seed corpus — small, deterministic demo data for Phase 6.
-// Loaded through IngestionService so both DocumentStore and InvertedIndex
-// are populated consistently.
+// Seed corpus — small, deterministic demo data for first-run.
+// Only loaded when no persistence file exists.
 // ---------------------------------------------------------------------------
 
 void load_seed_corpus(dse::IngestionService& ingestion)
@@ -81,11 +86,42 @@ void load_seed_corpus(dse::IngestionService& ingestion)
 }
 
 // ---------------------------------------------------------------------------
-// Command-line / environment port configuration
+// Rebuild the InvertedIndex from DocumentStore.
+// This demonstrates that the index is derived state.
 // ---------------------------------------------------------------------------
 
-int parse_port(int argc, char* argv[])
+void rebuild_index(dse::InvertedIndex& index, const dse::DocumentStore& store)
 {
+    for (const auto& [id, doc] : store.all()) {
+        index.add_document(id, doc.content);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Command-line / environment configuration
+// ---------------------------------------------------------------------------
+
+std::string resolve_data_path(int argc, char* argv[])
+{
+    // 1. Command-line argument
+    for (int i = 1; i < argc - 1; ++i) {
+        if (std::string_view(argv[i]) == "--data") {
+            return argv[i + 1];
+        }
+    }
+
+    // 2. Environment variable
+    if (const char* env = std::getenv("DSE_DATA")) {
+        return env;
+    }
+
+    // 3. Default
+    return "data/documents.jsonl";
+}
+
+int resolve_port(int argc, char* argv[])
+{
+    // 1. Command-line argument
     for (int i = 1; i < argc - 1; ++i) {
         if (std::string_view(argv[i]) == "--port") {
             try {
@@ -95,15 +131,6 @@ int parse_port(int argc, char* argv[])
                 return -1;
             }
         }
-    }
-    return 0;  // not specified on command line
-}
-
-int resolve_port(int argc, char* argv[])
-{
-    // 1. Command-line argument
-    if (const int cli_port = parse_port(argc, argv); cli_port > 0) {
-        return cli_port;
     }
 
     // 2. Environment variable
@@ -122,21 +149,34 @@ int resolve_port(int argc, char* argv[])
 
 int main(int argc, char* argv[])
 {
-    std::cout << "Distributed Search Engine | Phase 6 - Document Ingestion\n";
+    std::cout << "Distributed Search Engine | Phase 7 - Document Persistence\n";
     std::cout << "Built with C++ standard: " << __cplusplus << "\n\n";
+
+    // --- Resolve configuration ---
+    const std::string data_path = resolve_data_path(argc, argv);
+    std::cout << "Data path: " << data_path << "\n";
 
     // --- Create storage components ---
     dse::InvertedIndex index;
     dse::DocumentStore store;
 
-    // --- Create the service layer ---
-    dse::IngestionService ingestion(index, store);
+    // --- Create the service layer (with persistence) ---
+    dse::IngestionService ingestion(index, store, data_path);
     const dse::SearchService search(index);
 
-    // --- Load seed corpus through IngestionService ---
-    load_seed_corpus(ingestion);
-    std::cout << "Loaded " << index.document_count() << " seed documents ("
-              << index.term_count() << " distinct terms)\n";
+    // --- Startup recovery: load persisted documents or seed corpus ---
+    if (store.load(data_path)) {
+        // Persistence file loaded successfully — rebuild index from documents.
+        rebuild_index(index, store);
+        std::cout << "Loaded " << index.document_count() << " persisted documents ("
+                  << index.term_count() << " distinct terms)\n";
+    } else {
+        // No persistence file (first run) — load seed corpus.
+        std::cout << "No persistence file found — loading seed corpus\n";
+        load_seed_corpus(ingestion);
+        std::cout << "Loaded " << index.document_count() << " seed documents ("
+                  << index.term_count() << " distinct terms)\n";
+    }
 
     // --- Determine the port ---
     const int port = resolve_port(argc, argv);
