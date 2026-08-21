@@ -1,13 +1,18 @@
-// Distributed Search Engine - Document Store (Phase 6B-1, 7A-1).
+// Distributed Search Engine - Document Store (Phase 6B-1, 7A-1, 8A-1).
 //
 // Implementation of the contract in src/document_store.h:
 //   - add() inserts a new document; rejects duplicate IDs;
 //   - get() returns an owning copy or std::nullopt;
 //   - contains() is a simple map lookup;
 //   - size() returns the map size;
-//   - all() returns a const reference to the internal map;
+//   - all() returns a COPY of the document map (snapshot);
 //   - save() writes all documents as JSONL, sorted by doc_id;
 //   - load() reads JSONL, skips corrupt lines, rejects duplicate IDs.
+//
+// Thread-safety: all public methods are safe to call from multiple threads.
+// Read operations acquire a shared lock. Write operations acquire an
+// exclusive lock. The all() method acquires a shared lock, copies the
+// data, then releases the lock — the caller owns the snapshot.
 
 #include "document_store.h"
 
@@ -16,7 +21,11 @@
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <memory>
+#include <mutex>
 #include <optional>
+#include <shared_mutex>
+#include "shared_mutex.h"
 #include <string>
 #include <utility>
 #include <vector>
@@ -25,8 +34,18 @@
 
 namespace dse {
 
+// Constructor: initialize the mutex.
+DocumentStore::DocumentStore()
+    : mutex_(std::make_unique<SharedMutex>())
+{
+}
+
 bool DocumentStore::add(Document document)
 {
+    // Exclusive lock: only one thread can add at a time.
+    // This also prevents concurrent reads during mutation.
+    std::unique_lock lock(*mutex_);
+
     // Try to insert. If the ID already exists, insert() returns false
     // and leaves the existing entry untouched.
     const auto [it, inserted] = documents_.try_emplace(
@@ -36,25 +55,44 @@ bool DocumentStore::add(Document document)
 
 std::optional<Document> DocumentStore::get(doc_id id) const
 {
+    // Shared lock: multiple threads can read concurrently.
+    std::shared_lock lock(*mutex_);
+
     const auto it = documents_.find(id);
     if (it == documents_.end()) {
         return std::nullopt;
     }
-    return it->second;
+    return it->second;  // Copy the document (returns owning optional)
 }
 
 bool DocumentStore::contains(doc_id id) const
 {
+    // Shared lock: multiple threads can read concurrently.
+    std::shared_lock lock(*mutex_);
+
     return documents_.contains(id);
 }
 
 std::size_t DocumentStore::size() const
 {
+    // Shared lock: multiple threads can read concurrently.
+    std::shared_lock lock(*mutex_);
+
     return documents_.size();
 }
 
-const std::unordered_map<doc_id, Document>& DocumentStore::all() const
+std::unordered_map<doc_id, Document> DocumentStore::all() const
 {
+    // Shared lock: multiple threads can read concurrently.
+    // Copy the entire map while holding the lock, then release the lock.
+    // The caller owns the returned snapshot and can iterate it safely
+    // without holding any lock on the DocumentStore.
+    std::shared_lock lock(*mutex_);
+
+    // Return a copy (not a reference) to avoid lifetime issues.
+    // A reference would be unsafe because the lock is released when
+    // all() returns, leaving the caller with an unprotected reference
+    // that could be invalidated by a concurrent add() (rehash).
     return documents_;
 }
 
@@ -64,27 +102,32 @@ const std::unordered_map<doc_id, Document>& DocumentStore::all() const
 
 bool DocumentStore::save(const std::string& path) const
 {
-    // Collect documents into a vector and sort by doc_id for deterministic
-    // output. The unordered_map iteration order is unspecified.
-    std::vector<std::pair<doc_id, const Document*>> sorted;
-    sorted.reserve(documents_.size());
-    for (const auto& [id, doc] : documents_) {
-        sorted.emplace_back(id, &doc);
+    // Step 1: Take a snapshot under shared lock.
+    // This ensures we write a consistent set of documents.
+    std::vector<std::pair<doc_id, Document>> snapshot;
+    {
+        std::shared_lock lock(*mutex_);
+        snapshot.reserve(documents_.size());
+        for (const auto& [id, doc] : documents_) {
+            snapshot.emplace_back(id, doc);
+        }
     }
-    std::sort(sorted.begin(), sorted.end(),
+    // Lock released — file I/O happens without holding any lock.
+
+    // Step 2: Sort by doc_id for deterministic output.
+    std::sort(snapshot.begin(), snapshot.end(),
               [](const auto& a, const auto& b) { return a.first < b.first; });
 
-    // Open the file for writing (truncates existing content).
+    // Step 3: Write to file.
     std::ofstream ofs(path);
     if (!ofs.is_open()) {
         return false;
     }
 
-    // Write each document as one JSON object per line.
-    for (const auto& [id, doc] : sorted) {
+    for (const auto& [id, doc] : snapshot) {
         nlohmann::json j;
-        j["id"] = doc->id;
-        j["content"] = doc->content;
+        j["id"] = doc.id;
+        j["content"] = doc.content;
         ofs << j.dump() << "\n";
     }
 
@@ -94,15 +137,15 @@ bool DocumentStore::save(const std::string& path) const
 
 bool DocumentStore::load(const std::string& path)
 {
-    // If the file does not exist, return false and leave the store unchanged.
-    // This is the normal first-run condition.
+    // Step 1: Try to open the file without holding any lock.
+    // If the file doesn't exist, return false quickly.
     std::ifstream ifs(path);
     if (!ifs.is_open()) {
         return false;
     }
 
-    // Load into a temporary container first. If loading fails midway,
-    // the existing store is not partially destroyed.
+    // Step 2: Parse into a temporary container (no lock held).
+    // This is safe because we haven't modified the store yet.
     std::unordered_map<doc_id, Document> loaded;
     std::string line;
     std::size_t line_number = 0;
@@ -157,9 +200,11 @@ bool DocumentStore::load(const std::string& path)
         ++loaded_count;
     }
 
-    // Replace the current store with the loaded data.
-    // This is the point of no return — the old data is discarded.
-    documents_ = std::move(loaded);
+    // Step 3: Atomically replace the current store under exclusive lock.
+    {
+        std::unique_lock lock(*mutex_);
+        documents_ = std::move(loaded);
+    }
 
     if (skipped_count > 0) {
         std::cerr << "DocumentStore::load: loaded " << loaded_count

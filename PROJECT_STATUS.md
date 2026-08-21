@@ -2,17 +2,22 @@
 
 ## Current Phase
 
-Phase 7 — Document Persistence: **COMPLETE**
+Phase 8 — Concurrency and Thread Safety: **COMPLETE**
 
-- Phase 7A-1 — DocumentStore Persistence: **COMPLETE**
-- Phase 7A-2 — Startup Recovery + Index Rebuild: **COMPLETE**
+- Phase 8A-1 — DocumentStore Thread Safety: **COMPLETE**
+- Phase 8A-2 — InvertedIndex Thread Safety: **COMPLETE**
+- Phase 8A-3 — HTTP Concurrency Verification: **COMPLETE**
+- Phase 8B — Service-Level Coordination: **PENDING**
 
-### Phase 7 Verification Results (actual, UCRT64 toolchain)
+### Phase 8A Verification Results (actual, UCRT64 toolchain)
 
 - Build: **successful, zero warnings** (`-Wall -Wextra -Wpedantic`)
-- Tests: **333/333 passed (100%)**
-  - 31 HTTP API tests + 7 persistence startup tests + 9 app integration tests + 293 unit tests
-- Application: starts, loads persisted documents or seed corpus, serves HTTP, persists ingested documents
+- Tests: **362/362 passed (100%)**
+  - 9 HTTP concurrency tests + 10 InvertedIndex concurrency tests + 10 DocumentStore concurrency tests + 333 pre-existing tests
+- Repeated HTTP concurrency: **27/27 passed** (3 runs x 9 tests)
+- ConcurrentDuplicateAdds: **100/100 passed** (50+50 runs)
+- TSAN: **unavailable** (libtsan missing from MSYS2 UCRT64)
+- Application: handles concurrent requests safely, clean shutdown under load
 
 ## Completed: Phase 6
 

@@ -1,19 +1,25 @@
-// Distributed Search Engine - Inverted Index (Phase 2B).
+// Distributed Search Engine - Inverted Index (Phase 2B, Phase 8A-2).
 //
 // Public API only. Design per docs/decisions/ADR-002-inverted-index-design.md:
 // an in-memory, deterministic map from terms to sorted postings lists,
 // consuming dse::tokenize output from Phase 1.
+//
+// Phase 8A-2: Thread-safe via internal SharedMutex. All public methods are
+// safe for concurrent access. postings() returns an owning vector snapshot
+// instead of a non-owning span to ensure lifetime safety under mutation.
 
 #pragma once
 
 #include <cstddef>
 #include <cstdint>
-#include <span>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+#include "shared_mutex.h"
 
 namespace dse {
 
@@ -38,34 +44,51 @@ struct Posting {
 //     a contract violation, asserted in debug builds);
 //   - postings lists are always sorted by document ID;
 //   - duplicates within a document are aggregated into term frequencies;
-//   - postings(term) returns an empty span for unknown terms (a postings
-//     list is never empty for a term that exists);
-//   - a span returned by postings() is valid only until the next modification
-//     of the index (any add_document call) or its destruction;
+//   - postings(term) returns an empty vector for unknown terms;
 //   - identical insertion sequences produce identical indices (deterministic);
 //   - vocabulary iteration order is unspecified (do not depend on it).
+//
+// Thread safety (Phase 8A-2):
+//   - All public methods are safe for concurrent access.
+//   - Read operations (postings, document_count, term_count, contains) use
+//     shared locks allowing concurrent readers.
+//   - Write operations (add_document) use exclusive locks.
+//   - postings() returns an owning vector snapshot, not a borrowed span,
+//     to ensure lifetime safety when the index is mutated concurrently.
 //
 // Complexity: O(1) average lookup; O(T) amortized per add_document for a
 // document with T tokens; O(distinct term-document pairs) space.
 class InvertedIndex {
 public:
+    InvertedIndex() = default;
+    ~InvertedIndex();
+
+    InvertedIndex(const InvertedIndex&) = delete;
+    InvertedIndex& operator=(const InvertedIndex&) = delete;
+    InvertedIndex(InvertedIndex&&) = default;
+    InvertedIndex& operator=(InvertedIndex&&) = default;
+
     // Tokenizes `text` with dse::tokenize, counts term frequencies, and
     // merges (id, count) postings into the index, keeping every postings
-    // list sorted by document ID.
+    // list sorted by document ID. Thread-safe: acquires exclusive lock.
     void add_document(doc_id id, std::string_view text);
 
     // Postings list for `term`, sorted by document ID, or empty if the term
-    // is unknown. O(1) average. The returned view is non-owning: it borrows
-    // the index's storage and is valid until the next modification.
-    std::span<const Posting> postings(std::string_view term) const;
+    // is unknown. Returns an OWNING vector snapshot that is safe to use
+    // after the lock is released. O(1) average lookup + O(k) copy where
+    // k is the postings list length.
+    std::vector<Posting> postings(std::string_view term) const;
 
     // Number of documents added so far (including documents with no tokens).
+    // Thread-safe: acquires shared lock.
     std::size_t document_count() const;
 
     // Number of distinct terms in the vocabulary.
+    // Thread-safe: acquires shared lock.
     std::size_t term_count() const;
 
     // Whether `term` is in the vocabulary. O(1) average.
+    // Thread-safe: acquires shared lock.
     bool contains(std::string_view term) const;
 
 private:
@@ -74,6 +97,10 @@ private:
     // can be enforced.
     std::unordered_set<doc_id> documents_;
     std::size_t document_count_ = 0;
+
+    // Portable SharedMutex (see shared_mutex.h) to avoid MinGW bugs with
+    // std::shared_mutex. Wrapped in unique_ptr to preserve movability.
+    mutable std::unique_ptr<SharedMutex> mutex_ = std::make_unique<SharedMutex>();
 };
 
 } // namespace dse

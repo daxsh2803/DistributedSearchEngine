@@ -1,14 +1,16 @@
-// Distributed Search Engine - Query Processor (Phase 3B).
+// Distributed Search Engine - Query Processor (Phase 3B, Phase 8A-2).
 //
 // Public API only. Design per docs/decisions/ADR-003-query-processing-design.md:
 // two pure two-pointer merge primitives over sorted postings lists, plus a
 // QueryProcessor class that composes tokenization, index lookup, and merging
 // into AND/OR Boolean queries.
+//
+// Phase 8A-2: Updated to work with std::vector<Posting> (owning snapshots)
+// instead of std::span<const Posting> (non-owning views) for thread safety.
 
 #pragma once
 
 #include <cstdint>
-#include <span>
 #include <string_view>
 #include <vector>
 
@@ -21,11 +23,11 @@ namespace dse {
 // Precondition: both inputs sorted by document_id (the Phase 2 invariant).
 // Output: an owning vector of docIDs, sorted ascending, deduplicated.
 // Complexity: O(lhs.size() + rhs.size()).
-std::vector<doc_id> intersect(std::span<const Posting> lhs,
-                              std::span<const Posting> rhs);
+std::vector<doc_id> intersect(const std::vector<Posting>& lhs,
+                              const std::vector<Posting>& rhs);
 
-std::vector<doc_id> merge_union(std::span<const Posting> lhs,
-                                std::span<const Posting> rhs);
+std::vector<doc_id> merge_union(const std::vector<Posting>& lhs,
+                                const std::vector<Posting>& rhs);
 
 // Boolean query processor.
 //
@@ -39,6 +41,10 @@ std::vector<doc_id> merge_union(std::span<const Posting> lhs,
 //   - results are owning, sorted ascending, deduplicated;
 //   - an empty query (zero terms) returns an empty result;
 //   - a missing term makes AND empty and is ignored by OR.
+//
+// Thread safety (Phase 8A-2):
+//   - Safe for concurrent use with a thread-safe InvertedIndex.
+//   - QueryProcessor itself is stateless beyond the borrowed index pointer.
 class QueryProcessor {
 public:
     explicit QueryProcessor(const InvertedIndex& index);

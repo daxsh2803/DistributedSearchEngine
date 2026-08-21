@@ -1,4 +1,4 @@
-// Distributed Search Engine - Ranker (Phase 4B).
+// Distributed Search Engine - Ranker (Phase 4B, Phase 8A-2).
 //
 // Implementation of the contract in docs/decisions/ADR-004-ranking-design.md:
 //
@@ -11,6 +11,9 @@
 //
 // Complexity: O(Q + V log V + Σ Lᵢ + C log C) where Q = query length,
 // V = unique terms, Lᵢ = posting list lengths, C = candidates.
+//
+// Phase 8A-2: Updated to work with std::vector<Posting> (owning snapshots)
+// instead of std::span<const Posting> (non-owning views) for thread safety.
 
 #include "ranker.h"
 
@@ -61,7 +64,7 @@ std::vector<RankedResult> Ranker::ranked_and(std::string_view query) const
     //    in ALL posting lists.
     struct TermInfo {
         std::string_view term;
-        std::span<const Posting> postings_span;
+        std::vector<Posting> postings_list;  // owning snapshot
         double idf;
     };
 
@@ -74,14 +77,14 @@ std::vector<RankedResult> Ranker::ranked_and(std::string_view query) const
     }
 
     for (const auto& term : terms) {
-        const auto span = index_->postings(term);
-        if (span.empty()) {
+        const auto postings_list = index_->postings(term);
+        if (postings_list.empty()) {
             // Missing term poisons AND.
             return {};
         }
-        const double df = static_cast<double>(span.size());
+        const double df = static_cast<double>(postings_list.size());
         const double idf = std::log(n / df);
-        term_infos.push_back({std::string_view(term), span, idf});
+        term_infos.push_back({std::string_view(term), postings_list, idf});
     }
 
     // 4. Build candidate set: documents appearing in every posting list.
@@ -89,19 +92,19 @@ std::vector<RankedResult> Ranker::ranked_and(std::string_view query) const
     //    Sort by posting list size to minimize work.
     std::sort(term_infos.begin(), term_infos.end(),
               [](const TermInfo& a, const TermInfo& b) {
-                  return a.postings_span.size() < b.postings_span.size();
+                  return a.postings_list.size() < b.postings_list.size();
               });
 
     // Start with the smallest list's docIDs.
     std::unordered_map<doc_id, double> scores;
-    for (const auto& posting : term_infos[0].postings_span) {
+    for (const auto& posting : term_infos[0].postings_list) {
         scores[posting.document_id] = 0.0;
     }
 
     // Intersect with each subsequent list.
     for (std::size_t k = 1; k < term_infos.size(); ++k) {
         std::unordered_map<doc_id, double> next_scores;
-        for (const auto& posting : term_infos[k].postings_span) {
+        for (const auto& posting : term_infos[k].postings_list) {
             if (scores.count(posting.document_id)) {
                 next_scores[posting.document_id] = 0.0;
             }
@@ -114,7 +117,7 @@ std::vector<RankedResult> Ranker::ranked_and(std::string_view query) const
 
     // 5. Score each candidate document.
     for (const auto& info : term_infos) {
-        for (const auto& posting : info.postings_span) {
+        for (const auto& posting : info.postings_list) {
             auto it = scores.find(posting.document_id);
             if (it != scores.end()) {
                 it->second += static_cast<double>(posting.term_frequency)
@@ -161,14 +164,14 @@ std::vector<RankedResult> Ranker::ranked_or(std::string_view query) const
     std::unordered_map<doc_id, double> scores;
 
     for (const auto& term : terms) {
-        const auto span = index_->postings(term);
-        if (span.empty()) {
+        const auto postings_list = index_->postings(term);
+        if (postings_list.empty()) {
             continue;  // Missing term: ignore in OR.
         }
-        const double df = static_cast<double>(span.size());
+        const double df = static_cast<double>(postings_list.size());
         const double idf = std::log(n / df);
 
-        for (const auto& posting : span) {
+        for (const auto& posting : postings_list) {
             scores[posting.document_id] +=
                 static_cast<double>(posting.term_frequency) * idf;
         }

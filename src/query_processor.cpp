@@ -1,4 +1,4 @@
-// Distributed Search Engine - Query Processor (Phase 3B).
+// Distributed Search Engine - Query Processor (Phase 3B, Phase 8A-2).
 //
 // Implementation of the contract in docs/decisions/ADR-003-query-processing-design.md:
 //
@@ -15,14 +15,17 @@
 //
 // Complexity: O(a + b) per two-pointer merge; O(Q + V log V) query
 // preparation; O(result) output space.
+//
+// Phase 8A-2: Updated to work with std::vector<Posting> (owning snapshots)
+// instead of std::span<const Posting> (non-owning views) for thread safety.
 
 #include "query_processor.h"
 
 #include "tokenizer.h"
 
 #include <algorithm>
-#include <cassert>
 #include <cstddef>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -104,8 +107,8 @@ std::vector<doc_id> two_union(std::span<const doc_id> a,
 // Helpers
 // ---------------------------------------------------------------------------
 
-// Project a span of Postings to an owning vector of docIDs.
-std::vector<doc_id> project_doc_ids(std::span<const Posting> postings)
+// Project a vector of Postings to an owning vector of docIDs.
+std::vector<doc_id> project_doc_ids(const std::vector<Posting>& postings)
 {
     std::vector<doc_id> ids(postings.size());
     for (std::size_t i = 0; i < postings.size(); ++i) {
@@ -130,14 +133,14 @@ std::vector<std::string> dedup_terms(const std::vector<std::string>& terms)
 // Public free functions (ADR-003 API)
 // ---------------------------------------------------------------------------
 
-std::vector<doc_id> intersect(std::span<const Posting> lhs,
-                              std::span<const Posting> rhs)
+std::vector<doc_id> intersect(const std::vector<Posting>& lhs,
+                              const std::vector<Posting>& rhs)
 {
     return two_intersect(project_doc_ids(lhs), project_doc_ids(rhs));
 }
 
-std::vector<doc_id> merge_union(std::span<const Posting> lhs,
-                                std::span<const Posting> rhs)
+std::vector<doc_id> merge_union(const std::vector<Posting>& lhs,
+                                const std::vector<Posting>& rhs)
 {
     return two_union(project_doc_ids(lhs), project_doc_ids(rhs));
 }
@@ -171,15 +174,15 @@ std::vector<doc_id> QueryProcessor::and_query(std::string_view query) const
     std::vector<std::pair<std::size_t, std::string_view>> ranked;
     ranked.reserve(terms.size());
     for (const auto& term : terms) {
-        const auto span = index_->postings(term);
-        ranked.emplace_back(span.size(), std::string_view(term));
+        const auto postings_list = index_->postings(term);
+        ranked.emplace_back(postings_list.size(), std::string_view(term));
     }
     std::sort(ranked.begin(), ranked.end());
 
     // 5. Fold pairwise intersections, smallest list first.
     //    Start with the smallest list projected to docIDs.
-    const auto first_span = index_->postings(ranked[0].second);
-    std::vector<doc_id> result = project_doc_ids(first_span);
+    const auto first_postings = index_->postings(ranked[0].second);
+    std::vector<doc_id> result = project_doc_ids(first_postings);
 
     //    If the first list is empty, the intersection is empty regardless.
     if (result.empty()) {
@@ -187,8 +190,8 @@ std::vector<doc_id> QueryProcessor::and_query(std::string_view query) const
     }
 
     for (std::size_t k = 1; k < ranked.size(); ++k) {
-        const auto next_span = index_->postings(ranked[k].second);
-        result = two_intersect(result, project_doc_ids(next_span));
+        const auto next_postings = index_->postings(ranked[k].second);
+        result = two_intersect(result, project_doc_ids(next_postings));
 
         // Early termination: intersection only shrinks; if empty, done.
         if (result.empty()) {
@@ -218,8 +221,8 @@ std::vector<doc_id> QueryProcessor::or_query(std::string_view query) const
     std::vector<doc_id> result = project_doc_ids(index_->postings(terms[0]));
 
     for (std::size_t k = 1; k < terms.size(); ++k) {
-        const auto span = index_->postings(terms[k]);
-        result = two_union(result, project_doc_ids(span));
+        const auto postings_list = index_->postings(terms[k]);
+        result = two_union(result, project_doc_ids(postings_list));
     }
 
     return result;

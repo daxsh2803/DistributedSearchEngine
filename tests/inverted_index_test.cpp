@@ -31,8 +31,7 @@ using dse::Posting;
 void expect_postings(const InvertedIndex& index, std::string_view term,
                      std::vector<Posting> expected)
 {
-    const auto span = index.postings(term);
-    const std::vector<Posting> actual(span.begin(), span.end());
+    const auto actual = index.postings(term);
     EXPECT_EQ(actual, expected);
 }
 
@@ -62,10 +61,7 @@ void expect_indices_equal(const InvertedIndex& a, const InvertedIndex& b,
     EXPECT_EQ(a.document_count(), b.document_count());
     EXPECT_EQ(a.term_count(), b.term_count());
     for (const std::string_view term : terms) {
-        const auto sa = a.postings(term);
-        const auto sb = b.postings(term);
-        EXPECT_EQ(std::vector<Posting>(sa.begin(), sa.end()),
-                  std::vector<Posting>(sb.begin(), sb.end()));
+        EXPECT_EQ(a.postings(term), b.postings(term));
     }
 }
 
@@ -671,10 +667,9 @@ TEST(IndexSpanLifetime, CopySurvivesIndexModification)
     InvertedIndex index;
     index.add_document(1, "cat");
 
-    // Copying the data out of a span is the safe way to retain it across
-    // modifications (the span itself borrows the index's storage).
-    const std::vector<Posting> snapshot(index.postings("cat").begin(),
-                                        index.postings("cat").end());
+    // postings() now returns an owning vector snapshot, which is safe to
+    // retain across modifications. The returned vector owns its data.
+    const auto snapshot = index.postings("cat");
 
     index.add_document(2, "cat");
     index.add_document(3, "dog");

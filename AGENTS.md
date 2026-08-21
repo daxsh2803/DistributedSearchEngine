@@ -78,21 +78,20 @@ Before making major changes, inspect the current repository state.
 
 ## Current Project Phase
 
-PHASE 7 — Document Persistence: COMPLETE
+PHASE 8 — Concurrency and Thread Safety
 
-Phase 7A-1 — DocumentStore Persistence: COMPLETE
-Phase 7A-2 — Startup Recovery + Index Rebuild: COMPLETE
+Phase 8A-1 — DocumentStore Thread Safety: COMPLETE
+Phase 8A-2 — InvertedIndex Thread Safety: COMPLETE
+Phase 8A-3 — HTTP Concurrency Verification: COMPLETE
+Phase 8B — Service-Level Coordination: PENDING
 
-Phase 7 is fully implemented and verified (333/333 tests passing).
+Phase 8A is fully implemented and verified (362/362 tests passing).
+Phase 8B has not started yet.
 
 Do not implement later search-engine functionality such as:
-- inverted-index persistence
-- async persistence
-- WAL
-- database storage
-- distributed storage
-- replication
 - sharding
-- concurrency
+- replication
+- distributed query execution
+- distributed coordination
 
-The next development phase is Phase 8 (to be determined).
+The next development phase is Phase 8B — Service-Level Coordination.

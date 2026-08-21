@@ -1,4 +1,4 @@
-// Distributed Search Engine - Inverted Index (Phase 2B).
+// Distributed Search Engine - Inverted Index (Phase 2B, Phase 8A-2).
 //
 // Implementation of the contract in docs/decisions/ADR-002-inverted-index-design.md:
 //
@@ -8,8 +8,9 @@
 //   - postings lists are always sorted by document ID (append in the common
 //     in-order case, binary-search + insert otherwise);
 //   - each document ID may be added at most once (asserted in debug builds);
-//   - postings() returns a non-owning std::span<const Posting>, empty for
-//     unknown terms, valid until the next modification of the index.
+//   - postings() returns an owning vector snapshot, safe for concurrent use.
+//
+// Phase 8A-2: Thread safety via internal SharedMutex.
 
 #include "inverted_index.h"
 
@@ -18,16 +19,22 @@
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
+#include <shared_mutex>
 #include <string>
 #include <string_view>
 #include <unordered_map>
 #include <utility>
-#include <span>
+#include <vector>
 
 namespace dse {
 
+InvertedIndex::~InvertedIndex() = default;
+
 void InvertedIndex::add_document(doc_id id, std::string_view text)
 {
+    // Acquire exclusive lock for the entire mutation.
+    std::unique_lock lock(*mutex_);
+
     // Precondition (ADR-002): each document ID may be added at most once.
     // Re-adding is a contract violation - undefined behavior in release
     // builds, caught here in debug builds.
@@ -59,36 +66,45 @@ void InvertedIndex::add_document(doc_id id, std::string_view text)
     ++document_count_;
 }
 
-std::span<const Posting> InvertedIndex::postings(std::string_view term) const
+std::vector<Posting> InvertedIndex::postings(std::string_view term) const
 {
+    // Acquire shared lock for read-only access.
+    std::shared_lock lock(*mutex_);
+
     // ADR-002 accepts a temporary std::string key: hashing already reads
     // every byte of the term, so the copy costs the same O(|term|) as the
     // lookup itself (heterogeneous lookup needs a transparent hash).
     const auto it = postings_by_term_.find(std::string(term));
     if (it == postings_by_term_.end()) {
-        return {};
+        return {};  // Unknown term: return empty vector.
     }
 
-    // Borrow the list's heap buffer. The span stays valid across map rehashes
-    // (the buffer does not move); it is invalidated by a later push_back into
-    // this same list or by the index's destruction - hence the documented
-    // "valid until the next modification" contract.
-    const auto& list = it->second;
-    return std::span<const Posting>(list.data(), list.size());
+    // Return an owning copy of the postings list. This is safe to use
+    // after the lock is released because the caller owns the data.
+    // The copy costs O(k) where k is the list length, which is acceptable
+    // for thread safety. Callers that need to iterate over postings can
+    // do so without holding any lock on the index.
+    return it->second;
 }
 
 std::size_t InvertedIndex::document_count() const
 {
+    // Acquire shared lock for read-only access.
+    std::shared_lock lock(*mutex_);
     return document_count_;
 }
 
 std::size_t InvertedIndex::term_count() const
 {
+    // Acquire shared lock for read-only access.
+    std::shared_lock lock(*mutex_);
     return postings_by_term_.size();
 }
 
 bool InvertedIndex::contains(std::string_view term) const
 {
+    // Acquire shared lock for read-only access.
+    std::shared_lock lock(*mutex_);
     return postings_by_term_.contains(std::string(term));
 }
 
