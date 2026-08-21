@@ -51,7 +51,7 @@ struct IngestDocumentResponse {
 // Ingestion service with optional persistence. Borrows InvertedIndex and
 // DocumentStore (both mutable).
 //
-// Contract (Phase 6B-2 + 7A-2):
+// Contract (Phase 6B-2 + 7A-2 + 8B):
 //   - the index and store must outlive this service;
 //   - every call to ingest() is independent (no side effects on failure);
 //   - on success, the document is stored in BOTH DocumentStore AND
@@ -64,7 +64,11 @@ struct IngestDocumentResponse {
 //   - empty or whitespace-only content is rejected;
 //   - duplicate document IDs return a 409-style conflict error;
 //   - terms_indexed reflects the number of distinct terms added to
-//     the index (not total token occurrences).
+//     the index (not total token occurrences);
+//   - thread-safe: concurrent ingest() calls are safe. The duplicate
+//     check uses store_.add() as an atomic check-and-claim operation,
+//     eliminating the TOCTOU race that existed when contains() and
+//     add() were separate operations (Phase 8B).
 class IngestionService {
 public:
     // Construct without persistence (data_path empty = no persistence).

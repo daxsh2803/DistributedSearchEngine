@@ -286,6 +286,66 @@ The `stop()` method is safe to call from any thread (it sets an atomic flag). Th
 | Lock-free data structures | Not planned |
 | Fine-grained per-term locking | Not planned |
 
+## 11. Phase 8B: Service-Level Coordination
+
+### The TOCTOU Race (Solved)
+
+Phase 8A established data-structure-level safety. Phase 8B solves the service-level TOCTOU race in IngestionService.
+
+**Before (Phase 8A):**
+```cpp
+// CHECK — shared lock acquired and released
+if (store_.contains(request.id)) { return error; }
+// GAP — another thread could add the same ID here
+// USE — separate lock acquisitions
+store_.add(Document{request.id, request.content});
+index_.add_document(request.id, request.content);
+```
+
+**After (Phase 8B):**
+```cpp
+// Atomic "check and claim": add() returns false if ID already exists
+if (!store_.add(Document{request.id, request.content})) {
+    return error;  // Duplicate — add() rejected it
+}
+// ID is now claimed in DocumentStore. Safe to add to index.
+index_.add_document(request.id, request.content);
+```
+
+### Why This Works
+
+`DocumentStore::add()` uses `try_emplace` under an exclusive lock. It returns `true` if the insert succeeded, `false` if the ID already exists. This return value acts as an atomic "check-and-claim" operation.
+
+**Concrete scenario:**
+
+| Step | Thread A (ID 42) | Thread B (ID 42) |
+|------|-------------------|-------------------|
+| 1 | `store_.add({42, "first"})` → **true** | |
+| 2 | | `store_.add({42, "second"})` → **false** |
+| 3 | `index_.add_document(42, "first")` → succeeds | returns error |
+| 4 | | never reaches `add_document` |
+
+Thread B's `store_.add()` fails because Thread A already claimed ID 42. Thread B never reaches `index_.add_document()`.
+
+### Concurrency Guarantees (Phase 8B)
+
+| Guarantee | Status |
+|-----------|--------|
+| Duplicate document IDs rejected atomically | ✅ |
+| Document in both stores or neither | ✅ |
+| Concurrent different-document ingestions proceed | ✅ |
+| Concurrent search + ingestion is safe | ✅ |
+| No additional locks needed | ✅ |
+| No deadlock risk | ✅ |
+
+### What Phase 8B Does NOT Provide
+
+| Limitation | Why Deferred |
+|------------|-------------|
+| Atomic persistence (WAL, atomic rename) | Phase 9+ |
+| Rollback on partial failure | Complex transaction semantics |
+| Distributed transactions | Out of scope |
+
 ## 10. The TOCTOU Race
 
 ### What is TOCTOU?
@@ -391,13 +451,15 @@ For a search engine handling thousands of requests per second, this overhead is 
 
 | Metric | Result |
 |--------|--------|
-| Total tests | 362 |
-| Tests passed | **362/362 (100%)** |
+| Total tests | 368 |
+| Tests passed | **368/368 (100%)** |
 | HTTP concurrency tests | 9/9 |
 | InvertedIndex concurrency tests | 10/10 |
 | DocumentStore concurrency tests | 10/10 |
+| Ingestion concurrency tests | 6/6 |
 | ConcurrentDuplicateAdds (100 runs) | 100/100 |
 | HTTP concurrency (3 repeated runs) | 27/27 |
+| Ingestion concurrency (3 repeated runs) | 18/18 |
 | Compiler warnings | **0** |
 | TSAN | **unavailable** (libtsan missing from MSYS2 UCRT64) |
 
@@ -413,3 +475,5 @@ For a search engine handling thousands of requests per second, this overhead is 
 8. **Snapshots under lock, I/O without** — minimize lock hold time for better throughput
 9. **Atomic replacement** — load into temporary container, replace atomically
 10. **Test under contention** — concurrent tests must create real parallel load, not just sequential calls
+11. **Use return values as atomic checks** — `add()` return value eliminates TOCTOU without new locks
+12. **Leverage existing atomicity** — `try_emplace` under exclusive lock is already the check-and-act we need

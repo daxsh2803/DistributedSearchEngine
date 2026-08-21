@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (Phase 8A-1: DocumentStore; Phase 8A-2: InvertedIndex; Phase 8A-3: HTTP concurrency)
+Accepted (Phase 8A-1: DocumentStore; Phase 8A-2: InvertedIndex; Phase 8A-3: HTTP concurrency; Phase 8B: Service-level coordination)
 
 ## Context
 
@@ -92,9 +92,11 @@ The HTTP handlers are stateless beyond borrowed references to thread-safe Search
 
 **Rejected.** Unbounded threads lead to resource exhaustion. cpp-httplib's bounded thread pool is the standard approach.
 
-## Known Limitation: TOCTOU Race in IngestionService
+## Phase 8B: Service-Level Coordination
 
-Concurrent duplicate ingestion can expose a Time-of-Check-Time-of-Use race:
+### Problem
+
+Concurrent duplicate ingestion exposed a TOCTOU race in IngestionService:
 
 ```
 Thread A: store_.contains(42) → false   (shared lock)
@@ -105,9 +107,52 @@ Thread A: index_.add_document(42, ...)   → succeeds
 Thread B: index_.add_document(42, ...)   → assertion failure
 ```
 
-Both threads pass the `contains()` check before either adds. Thread B's `store_.add()` fails, but `IngestionService::ingest()` does not check the return value before calling `index_.add_document()`.
+### Solution
 
-**This is explicitly deferred to Phase 8B** (service-level coordination). Phase 8A establishes data-structure-level safety; Phase 8B adds atomic check-and-act semantics across services.
+Replace the separate `contains()` + `add()` pattern with a single atomic `add()` call:
+
+```cpp
+// Before (TOCTOU race):
+if (store_.contains(request.id)) { return error; }
+store_.add(Document{request.id, request.content});
+index_.add_document(request.id, request.content);
+
+// After (atomic check-and-claim):
+if (!store_.add(Document{request.id, request.content})) {
+    return error;  // Duplicate — add() rejected it
+}
+index_.add_document(request.id, request.content);
+```
+
+`DocumentStore::add()` uses `try_emplace` under an exclusive lock and returns `true` if the insert succeeded. This return value acts as an atomic "check-and-claim" operation: the document ID is claimed in DocumentStore before we attempt to add it to InvertedIndex.
+
+### Why This Works
+
+| Step | Thread A (ID 42) | Thread B (ID 42) |
+|------|-------------------|-------------------|
+| 1 | `store_.add({42, "first"})` → **true** (claims ID) | |
+| 2 | | `store_.add({42, "second"})` → **false** (rejected) |
+| 3 | `index_.add_document(42, "first")` → succeeds | returns error |
+| 4 | | never reaches `add_document` |
+
+### Guarantees
+
+- Duplicate document IDs are rejected atomically
+- Document is in both DocumentStore and InvertedIndex, or neither
+- Concurrent different-document ingestions proceed
+- Concurrent search + ingestion is safe
+- No additional locks needed
+- No deadlock risk (locks are never nested)
+
+### Files Modified
+- `src/ingestion_service.cpp` — removed `contains()` check, use `add()` return value
+- `src/ingestion_service.h` — updated contract documentation
+- `tests/ingestion_service_test.cpp` — added 6 concurrency tests
+
+### Verification
+- Build: **successful, zero warnings**
+- Tests: **368/368 passed (100%)** — 6 new ingestion concurrency tests
+- Repeated ingestion concurrency: **18/18 passed** (3 runs × 6 tests)
 
 ## Consequences
 

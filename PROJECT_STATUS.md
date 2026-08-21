@@ -7,13 +7,13 @@ Phase 8 — Concurrency and Thread Safety: **COMPLETE**
 - Phase 8A-1 — DocumentStore Thread Safety: **COMPLETE**
 - Phase 8A-2 — InvertedIndex Thread Safety: **COMPLETE**
 - Phase 8A-3 — HTTP Concurrency Verification: **COMPLETE**
-- Phase 8B — Service-Level Coordination: **PENDING**
+- Phase 8B — Service-Level Coordination: **COMPLETE**
 
 ### Phase 8A Verification Results (actual, UCRT64 toolchain)
 
 - Build: **successful, zero warnings** (`-Wall -Wextra -Wpedantic`)
-- Tests: **362/362 passed (100%)**
-  - 9 HTTP concurrency tests + 10 InvertedIndex concurrency tests + 10 DocumentStore concurrency tests + 333 pre-existing tests
+- Tests: **368/368 passed (100%)**
+  - 9 HTTP concurrency tests + 10 InvertedIndex concurrency tests + 10 DocumentStore concurrency tests + 6 ingestion concurrency tests + 333 pre-existing tests
 - Repeated HTTP concurrency: **27/27 passed** (3 runs x 9 tests)
 - ConcurrentDuplicateAdds: **100/100 passed** (50+50 runs)
 - TSAN: **unavailable** (libtsan missing from MSYS2 UCRT64)

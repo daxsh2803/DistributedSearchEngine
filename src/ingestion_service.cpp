@@ -73,10 +73,14 @@ IngestDocumentResponse IngestionService::ingest(
         return response;
     }
 
-    // Check for duplicate ID BEFORE storing anything.
-    // This ensures atomicity: if the document already exists, neither
-    // DocumentStore nor InvertedIndex is modified.
-    if (store_.contains(request.id)) {
+    // Atomic "check and claim": store_.add() returns false if a document
+    // with this ID already exists. This eliminates the TOCTOU race that
+    // existed when contains() and add() were separate operations.
+    //
+    // Thread-safety guarantee: if two threads ingest the same ID,
+    // exactly one succeeds (add() → true) and the other is rejected
+    // (add() → false → error response, index_.add_document() never called).
+    if (!store_.add(Document{request.id, request.content})) {
         response.is_error = true;
         response.error_message =
             "Document with id " + std::to_string(request.id) +
@@ -95,9 +99,6 @@ IngestDocumentResponse IngestionService::ingest(
     for (const auto& token : tokens) {
         distinct_terms.insert(token);
     }
-
-    // Store the raw document text.
-    store_.add(Document{request.id, request.content});
 
     // Index the document in the InvertedIndex.
     index_.add_document(request.id, request.content);

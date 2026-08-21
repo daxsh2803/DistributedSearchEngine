@@ -12,10 +12,12 @@
 #include "ingestion_service.h"
 #include "tokenizer.h"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -27,6 +29,7 @@ using dse::IngestDocumentResponse;
 using dse::IngestionService;
 using dse::InvertedIndex;
 using dse::Posting;
+using dse::doc_id;
 
 } // namespace
 
@@ -390,4 +393,246 @@ TEST(IngestionDeterminism, SameRequestsSameState)
     EXPECT_EQ(a_idx.document_count(), b_idx.document_count());
     EXPECT_EQ(a_store.size(), b_store.size());
     EXPECT_EQ(a_idx.term_count(), b_idx.term_count());
+}
+
+// ===========================================================================
+// 15. Concurrency tests (Phase 8B)
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// 15a. Concurrent duplicate ingestion — only one succeeds
+// ---------------------------------------------------------------------------
+
+TEST(IngestionConcurrency, ConcurrentDuplicateIngestion)
+{
+    InvertedIndex index;
+    DocumentStore store;
+    IngestionService service(index, store);
+
+    constexpr int kThreads = 8;
+    std::vector<std::thread> threads;
+    std::vector<std::atomic<int>> status_codes(kThreads);
+    for (auto& s : status_codes) s.store(0);
+
+    // All threads attempt to ingest the same document ID.
+    for (int i = 0; i < kThreads; ++i) {
+        threads.emplace_back([&service, i, &status_codes]() {
+            const auto resp = service.ingest(
+                {42, "duplicate attempt " + std::to_string(i)});
+            status_codes[i].store(resp.is_error ? 409 : 201);
+        });
+    }
+
+    for (auto& t : threads) {
+        t.join();
+    }
+
+    // Exactly one should succeed (201), the rest should fail (409).
+    int success_count = 0;
+    int conflict_count = 0;
+    for (int i = 0; i < kThreads; ++i) {
+        const int code = status_codes[i].load();
+        if (code == 201) ++success_count;
+        else if (code == 409) ++conflict_count;
+    }
+    EXPECT_EQ(success_count, 1);
+    EXPECT_EQ(conflict_count, kThreads - 1);
+}
+
+// ---------------------------------------------------------------------------
+// 15b. Concurrent unique ingestion — all succeed
+// ---------------------------------------------------------------------------
+
+TEST(IngestionConcurrency, ConcurrentUniqueIngestion)
+{
+    InvertedIndex index;
+    DocumentStore store;
+    IngestionService service(index, store);
+
+    constexpr int kThreads = 16;
+    std::vector<std::thread> threads;
+    std::vector<std::atomic<bool>> success(kThreads);
+    for (auto& s : success) s.store(false);
+
+    for (int i = 0; i < kThreads; ++i) {
+        threads.emplace_back([&service, i, &success]() {
+            const auto resp = service.ingest(
+                {100 + static_cast<doc_id>(i),
+                 "unique document " + std::to_string(i)});
+            success[i].store(!resp.is_error);
+        });
+    }
+
+    for (auto& t : threads) {
+        t.join();
+    }
+
+    // All 16 should succeed (unique IDs).
+    for (int i = 0; i < kThreads; ++i) {
+        SCOPED_TRACE("thread " + std::to_string(i));
+        EXPECT_TRUE(success[i].load());
+    }
+
+    EXPECT_EQ(store.size(), static_cast<std::size_t>(kThreads));
+    EXPECT_EQ(index.document_count(), static_cast<std::size_t>(kThreads));
+}
+
+// ---------------------------------------------------------------------------
+// 15c. Duplicate is not indexed twice
+// ---------------------------------------------------------------------------
+
+TEST(IngestionConcurrency, DuplicateNotIndexedTwice)
+{
+    InvertedIndex index;
+    DocumentStore store;
+    IngestionService service(index, store);
+
+    constexpr int kThreads = 8;
+    std::vector<std::thread> threads;
+
+    for (int i = 0; i < kThreads; ++i) {
+        threads.emplace_back([&service]() {
+            service.ingest({42, "cat cat dog"});
+        });
+    }
+
+    for (auto& t : threads) {
+        t.join();
+    }
+
+    // Document 42 should exist exactly once.
+    EXPECT_EQ(store.size(), 1u);
+    EXPECT_EQ(index.document_count(), 1u);
+
+    // Term frequencies must match a single ingestion of "cat cat dog".
+    const auto cat_postings = index.postings("cat");
+    ASSERT_EQ(cat_postings.size(), 1u);
+    EXPECT_EQ(cat_postings[0].term_frequency, 2u);
+    EXPECT_EQ(cat_postings[0].document_id, 42u);
+
+    const auto dog_postings = index.postings("dog");
+    ASSERT_EQ(dog_postings.size(), 1u);
+    EXPECT_EQ(dog_postings[0].term_frequency, 1u);
+}
+
+// ---------------------------------------------------------------------------
+// 15d. Existing content unchanged on concurrent duplicate
+// ---------------------------------------------------------------------------
+
+TEST(IngestionConcurrency, ExistingContentUnchangedOnDuplicate)
+{
+    InvertedIndex index;
+    DocumentStore store;
+    IngestionService service(index, store);
+
+    // First ingestion sets the content.
+    service.ingest({42, "original content"});
+
+    constexpr int kThreads = 8;
+    std::vector<std::thread> threads;
+
+    // All threads attempt to overwrite with different content.
+    for (int i = 0; i < kThreads; ++i) {
+        threads.emplace_back([&service, i]() {
+            service.ingest({42, "overwrite attempt " + std::to_string(i)});
+        });
+    }
+
+    for (auto& t : threads) {
+        t.join();
+    }
+
+    // Original content must be preserved.
+    const auto doc = store.get(42);
+    ASSERT_TRUE(doc.has_value());
+    EXPECT_EQ(doc->content, "original content");
+}
+
+// ---------------------------------------------------------------------------
+// 15e. Document count consistent after concurrent ingestion
+// ---------------------------------------------------------------------------
+
+TEST(IngestionConcurrency, DocumentCountConsistentAfterConcurrency)
+{
+    InvertedIndex index;
+    DocumentStore store;
+    IngestionService service(index, store);
+
+    constexpr int kThreads = 12;
+    std::vector<std::thread> threads;
+
+    // Each thread ingests a unique document.
+    for (int i = 0; i < kThreads; ++i) {
+        threads.emplace_back([&service, i]() {
+            service.ingest(
+                {200 + static_cast<doc_id>(i),
+                 "document " + std::to_string(i) + " content"});
+        });
+    }
+
+    for (auto& t : threads) {
+        t.join();
+    }
+
+    // DocumentStore and InvertedIndex must agree.
+    EXPECT_EQ(store.size(), index.document_count());
+    EXPECT_EQ(store.size(), static_cast<std::size_t>(kThreads));
+}
+
+// ---------------------------------------------------------------------------
+// 15f. Concurrent search + ingestion
+// ---------------------------------------------------------------------------
+
+TEST(IngestionConcurrency, ConcurrentSearchAndIngestion)
+{
+    InvertedIndex index;
+    DocumentStore store;
+    IngestionService service(index, store);
+
+    // Pre-load some documents for searching.
+    for (int i = 0; i < 10; ++i) {
+        service.ingest({static_cast<doc_id>(i),
+                        "searchable term" + std::to_string(i)});
+    }
+
+    constexpr int kSearchers = 4;
+    constexpr int kIngesters = 4;
+    std::vector<std::thread> threads;
+    std::atomic<int> successful_searches{0};
+    std::atomic<int> successful_ingests{0};
+
+    // Searcher threads.
+    for (int i = 0; i < kSearchers; ++i) {
+        threads.emplace_back([&index, &successful_searches]() {
+            for (int j = 0; j < 5; ++j) {
+                const auto postings = index.postings("searchable");
+                if (!postings.empty()) {
+                    successful_searches.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+        });
+    }
+
+    // Ingester threads.
+    for (int i = 0; i < kIngesters; ++i) {
+        threads.emplace_back([&service, i, &successful_ingests]() {
+            for (int j = 0; j < 5; ++j) {
+                const doc_id id = 1000 + i * 100 + j;
+                const auto resp = service.ingest(
+                    {id, "concurrent doc " + std::to_string(id)});
+                if (!resp.is_error) {
+                    successful_ingests.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+        });
+    }
+
+    for (auto& t : threads) {
+        t.join();
+    }
+
+    // All searches should have found results.
+    EXPECT_EQ(successful_searches.load(), kSearchers * 5);
+    // All ingestions should have succeeded (unique IDs).
+    EXPECT_EQ(successful_ingests.load(), kIngesters * 5);
 }
