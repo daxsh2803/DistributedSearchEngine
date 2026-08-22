@@ -1,9 +1,11 @@
-// Distributed Search Engine - HTTP Server (Phase 5B-2).
+// Distributed Search Engine - HTTP Server (Phase 5B-2, 9).
 //
 // Implements the HTTP transport layer using cpp-httplib and nlohmann/json.
-// The single GET /search endpoint translates HTTP query parameters into
-// a SearchRequest, delegates to SearchService, and serializes the response
-// as JSON.
+// GET /search, POST /documents (Phase 5B-2/6), PUT /documents/:id,
+// DELETE /documents/:id (Phase 9).
+//
+// PUT/DELETE use httplib's PathParamsMatcher (/documents/:id) which is
+// portable across all platforms including MinGW/MSYS2.
 
 #include "http_server.h"
 #include "ingestion_service.h"
@@ -47,6 +49,15 @@ std::string to_json(const SearchResponse& resp)
     return j.dump();
 }
 
+// Error response helper
+void error_response(httplib::Response& res, int status, const std::string& msg)
+{
+    res.status = status;
+    nlohmann::json err;
+    err["error"] = msg;
+    res.set_content(err.dump(), "application/json");
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -70,16 +81,13 @@ HttpServer::~HttpServer()
 bool HttpServer::listen(int port)
 {
     if (port == 0) {
-        // OS-assigned port (used by tests).
         const int actual = server_->bind_to_any_port("127.0.0.1");
         if (actual < 0) return false;
         port_ = actual;
     } else {
-        // Specific port requested.
         if (!server_->bind_to_port("127.0.0.1", port)) return false;
         port_ = port;
     }
-    // listen_after_bind() blocks the calling thread until stop() is called.
     return server_->listen_after_bind();
 }
 
@@ -109,74 +117,44 @@ void HttpServer::register_routes()
     // --- GET /search ---
     server_->Get("/search", [this](const httplib::Request& req,
                                     httplib::Response& res) {
-        // --- Parse query parameters ---
         SearchRequest request;
         request.query = req.get_param_value("q");
 
-        // Mode parameter
         const auto mode = req.get_param_value("mode");
         if (mode == "and") {
             request.mode = SearchMode::And;
         } else if (mode.empty() || mode == "or") {
             request.mode = SearchMode::Or;
         } else {
-            res.status = 400;
-            res.set_content(
-                to_json(SearchResponse{
-                    "", "", 0, 0, {}, true,
-                    "Invalid mode: must be 'and' or 'or'"
-                }),
-                "application/json");
+            error_response(res, 400, "Invalid mode: must be 'and' or 'or'");
             return;
         }
 
-        // Limit parameter
         if (!req.get_param_value("limit").empty()) {
             try {
                 const auto val = std::stoi(req.get_param_value("limit"));
                 if (val < 1 || val > 100) {
-                    res.status = 400;
-                    res.set_content(
-                        to_json(SearchResponse{
-                            "", "", 0, 0, {}, true,
-                            "Invalid limit: must be between 1 and 100"
-                        }),
-                        "application/json");
+                    error_response(res, 400,
+                        "Invalid limit: must be between 1 and 100");
                     return;
                 }
                 request.limit = static_cast<std::size_t>(val);
             } catch (...) {
-                res.status = 400;
-                res.set_content(
-                    to_json(SearchResponse{
-                        "", "", 0, 0, {}, true,
-                        "Invalid limit: must be an integer"
-                    }),
-                    "application/json");
+                error_response(res, 400, "Invalid limit: must be an integer");
                 return;
             }
         }
 
-        // --- Execute search ---
         try {
             const auto response = search_.search(request);
-
             if (response.is_error) {
-                res.status = 400;
-                res.set_content(to_json(response), "application/json");
+                error_response(res, 400, response.error_message);
                 return;
             }
-
             res.status = 200;
             res.set_content(to_json(response), "application/json");
         } catch (...) {
-            res.status = 500;
-            res.set_content(
-                to_json(SearchResponse{
-                    "", "", 0, 0, {}, true,
-                    "Internal server error"
-                }),
-                "application/json");
+            error_response(res, 500, "Internal server error");
         }
     });
 
@@ -184,63 +162,142 @@ void HttpServer::register_routes()
     server_->Post("/documents", [this](const httplib::Request& req,
                                         httplib::Response& res) {
         try {
-            // Parse JSON body
             nlohmann::json body;
             try {
                 body = nlohmann::json::parse(req.body);
             } catch (...) {
-                res.status = 400;
-                nlohmann::json err;
-                err["error"] = "Invalid JSON body";
-                res.set_content(err.dump(), "application/json");
+                error_response(res, 400, "Invalid JSON body");
                 return;
             }
 
-            // Extract fields
             IngestDocumentRequest request;
 
             if (!body.contains("id") || !body["id"].is_number_unsigned()) {
-                res.status = 400;
-                nlohmann::json err;
-                err["error"] = "Missing or invalid 'id' field (must be a non-negative integer)";
-                res.set_content(err.dump(), "application/json");
+                error_response(res, 400,
+                    "Missing or invalid 'id' field (must be a non-negative integer)");
                 return;
             }
             request.id = body["id"].get<doc_id>();
 
             if (!body.contains("content") || !body["content"].is_string()) {
-                res.status = 400;
-                nlohmann::json err;
-                err["error"] = "Missing or invalid 'content' field (must be a string)";
-                res.set_content(err.dump(), "application/json");
+                error_response(res, 400,
+                    "Missing or invalid 'content' field (must be a string)");
                 return;
             }
             request.content = body["content"].get<std::string>();
 
-            // Delegate to IngestionService
             const auto response = ingestion_.ingest(request);
 
             if (response.is_error) {
-                // Check if it's a conflict (duplicate ID) or validation error
-                const bool is_conflict = response.error_message.find("already exists") != std::string::npos;
-                res.status = is_conflict ? 409 : 400;
-                nlohmann::json err;
-                err["error"] = response.error_message;
-                res.set_content(err.dump(), "application/json");
+                const bool is_conflict =
+                    response.error_message.find("already exists") !=
+                    std::string::npos;
+                error_response(res, is_conflict ? 409 : 400,
+                    response.error_message);
                 return;
             }
 
-            // Success: 201 Created
             nlohmann::json result;
             result["document_id"] = response.document_id;
             result["terms_indexed"] = response.terms_indexed;
             res.status = 201;
             res.set_content(result.dump(), "application/json");
         } catch (...) {
-            res.status = 500;
-            nlohmann::json err;
-            err["error"] = "Internal server error";
-            res.set_content(err.dump(), "application/json");
+            error_response(res, 500, "Internal server error");
+        }
+    });
+
+    // --- PUT /documents/:id ---
+    server_->Put("/documents/:id", [this](const httplib::Request& req,
+                                           httplib::Response& res) {
+        try {
+            // Extract document ID from path parameter.
+            const auto it = req.path_params.find("id");
+            if (it == req.path_params.end()) {
+                error_response(res, 400, "Missing document ID in URL");
+                return;
+            }
+
+            doc_id id;
+            try {
+                id = static_cast<doc_id>(std::stoul(it->second));
+            } catch (...) {
+                error_response(res, 400, "Invalid document ID in URL");
+                return;
+            }
+
+            // Parse JSON body
+            nlohmann::json body;
+            try {
+                body = nlohmann::json::parse(req.body);
+            } catch (...) {
+                error_response(res, 400, "Invalid JSON body");
+                return;
+            }
+
+            if (!body.contains("content") || !body["content"].is_string()) {
+                error_response(res, 400,
+                    "Missing or invalid 'content' field (must be a string)");
+                return;
+            }
+
+            UpdateDocumentRequest request;
+            request.id = id;
+            request.content = body["content"].get<std::string>();
+
+            const auto response = ingestion_.update(request);
+
+            if (response.is_error) {
+                const bool is_not_found =
+                    response.error_message.find("not found") !=
+                    std::string::npos;
+                error_response(res, is_not_found ? 404 : 400,
+                    response.error_message);
+                return;
+            }
+
+            nlohmann::json result;
+            result["document_id"] = response.document_id;
+            result["terms_indexed"] = response.terms_indexed;
+            res.status = 200;
+            res.set_content(result.dump(), "application/json");
+        } catch (...) {
+            error_response(res, 500, "Internal server error");
+        }
+    });
+
+    // --- DELETE /documents/:id ---
+    server_->Delete("/documents/:id", [this](const httplib::Request& req,
+                                              httplib::Response& res) {
+        try {
+            const auto it = req.path_params.find("id");
+            if (it == req.path_params.end()) {
+                error_response(res, 400, "Missing document ID in URL");
+                return;
+            }
+
+            doc_id id;
+            try {
+                id = static_cast<doc_id>(std::stoul(it->second));
+            } catch (...) {
+                error_response(res, 400, "Invalid document ID in URL");
+                return;
+            }
+
+            const auto response = ingestion_.remove(id);
+
+            if (response.is_error) {
+                const bool is_not_found =
+                    response.error_message.find("not found") !=
+                    std::string::npos;
+                error_response(res, is_not_found ? 404 : 500,
+                    response.error_message);
+                return;
+            }
+
+            res.status = 204;
+        } catch (...) {
+            error_response(res, 500, "Internal server error");
         }
     });
 }

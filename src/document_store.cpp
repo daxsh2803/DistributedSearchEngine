@@ -53,6 +53,31 @@ bool DocumentStore::add(Document document)
     return inserted;
 }
 
+bool DocumentStore::update(Document document)
+{
+    // Exclusive lock: only one thread can update at a time.
+    std::unique_lock lock(*mutex_);
+
+    // Find the existing document. If it doesn't exist, return false.
+    auto it = documents_.find(document.id);
+    if (it == documents_.end()) {
+        return false;
+    }
+
+    // Replace the content of the existing document.
+    it->second.content = std::move(document.content);
+    return true;
+}
+
+bool DocumentStore::remove(doc_id id)
+{
+    // Exclusive lock: only one thread can remove at a time.
+    std::unique_lock lock(*mutex_);
+
+    // Erase returns the number of elements removed (0 or 1).
+    return documents_.erase(id) > 0;
+}
+
 std::optional<Document> DocumentStore::get(doc_id id) const
 {
     // Shared lock: multiple threads can read concurrently.

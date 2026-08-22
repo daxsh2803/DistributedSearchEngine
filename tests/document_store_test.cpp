@@ -851,3 +851,245 @@ TEST(DocumentStorePersistence, EmptyStoreSaveLoad)
     EXPECT_TRUE(loaded.load(path));
     EXPECT_EQ(loaded.size(), 0u);
 }
+
+// ===========================================================================
+// Phase 9: Update and Remove Tests
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// 43. Update existing document
+// ---------------------------------------------------------------------------
+
+TEST(DocumentStoreUpdate, UpdateExistingDocument)
+{
+    DocumentStore store;
+    store.add({1, "original content"});
+
+    EXPECT_TRUE(store.update({1, "updated content"}));
+
+    const auto doc = store.get(1);
+    ASSERT_TRUE(doc.has_value());
+    EXPECT_EQ(doc->content, "updated content");
+}
+
+// ---------------------------------------------------------------------------
+// 44. Update missing document returns false
+// ---------------------------------------------------------------------------
+
+TEST(DocumentStoreUpdate, UpdateMissingDocumentReturnsFalse)
+{
+    DocumentStore store;
+    store.add({1, "content"});
+
+    EXPECT_FALSE(store.update({2, "new content"}));
+    EXPECT_FALSE(store.update({999, "nonexistent"}));
+}
+
+// ---------------------------------------------------------------------------
+// 45. Update preserves document count
+// ---------------------------------------------------------------------------
+
+TEST(DocumentStoreUpdate, UpdatePreservesDocumentCount)
+{
+    DocumentStore store;
+    store.add({1, "alpha"});
+    store.add({2, "beta"});
+    const std::size_t count = store.size();
+
+    store.update({1, "updated alpha"});
+
+    EXPECT_EQ(store.size(), count);
+}
+
+// ---------------------------------------------------------------------------
+// 46. Update does not affect other documents
+// ---------------------------------------------------------------------------
+
+TEST(DocumentStoreUpdate, UpdateDoesNotAffectOtherDocuments)
+{
+    DocumentStore store;
+    store.add({1, "alpha"});
+    store.add({2, "beta"});
+
+    store.update({1, "updated alpha"});
+
+    const auto d2 = store.get(2);
+    ASSERT_TRUE(d2.has_value());
+    EXPECT_EQ(d2->content, "beta");
+}
+
+// ---------------------------------------------------------------------------
+// 47. Remove existing document
+// ---------------------------------------------------------------------------
+
+TEST(DocumentStoreRemove, RemoveExistingDocument)
+{
+    DocumentStore store;
+    store.add({1, "content"});
+
+    EXPECT_TRUE(store.remove(1));
+    EXPECT_FALSE(store.contains(1));
+    EXPECT_FALSE(store.get(1).has_value());
+}
+
+// ---------------------------------------------------------------------------
+// 48. Remove missing document returns false
+// ---------------------------------------------------------------------------
+
+TEST(DocumentStoreRemove, RemoveMissingDocumentReturnsFalse)
+{
+    DocumentStore store;
+    store.add({1, "content"});
+
+    EXPECT_FALSE(store.remove(2));
+    EXPECT_FALSE(store.remove(999));
+}
+
+// ---------------------------------------------------------------------------
+// 49. Remove decreases document count
+// ---------------------------------------------------------------------------
+
+TEST(DocumentStoreRemove, RemoveDecreasesDocumentCount)
+{
+    DocumentStore store;
+    store.add({1, "alpha"});
+    store.add({2, "beta"});
+    store.add({3, "gamma"});
+
+    EXPECT_EQ(store.size(), 3u);
+    store.remove(2);
+    EXPECT_EQ(store.size(), 2u);
+}
+
+// ---------------------------------------------------------------------------
+// 50. Remove does not affect other documents
+// ---------------------------------------------------------------------------
+
+TEST(DocumentStoreRemove, RemoveDoesNotAffectOtherDocuments)
+{
+    DocumentStore store;
+    store.add({1, "alpha"});
+    store.add({2, "beta"});
+    store.add({3, "gamma"});
+
+    store.remove(2);
+
+    EXPECT_TRUE(store.contains(1));
+    EXPECT_FALSE(store.contains(2));
+    EXPECT_TRUE(store.contains(3));
+
+    const auto d1 = store.get(1);
+    ASSERT_TRUE(d1.has_value());
+    EXPECT_EQ(d1->content, "alpha");
+
+    const auto d3 = store.get(3);
+    ASSERT_TRUE(d3.has_value());
+    EXPECT_EQ(d3->content, "gamma");
+}
+
+// ---------------------------------------------------------------------------
+// 51. Remove all documents leaves empty store
+// ---------------------------------------------------------------------------
+
+TEST(DocumentStoreRemove, RemoveAllLeavesEmptyStore)
+{
+    DocumentStore store;
+    store.add({1, "alpha"});
+    store.add({2, "beta"});
+
+    store.remove(1);
+    store.remove(2);
+
+    EXPECT_EQ(store.size(), 0u);
+    EXPECT_FALSE(store.contains(1));
+    EXPECT_FALSE(store.contains(2));
+}
+
+// ---------------------------------------------------------------------------
+// 52. Double remove is safe
+// ---------------------------------------------------------------------------
+
+TEST(DocumentStoreRemove, DoubleRemoveIsSafe)
+{
+    DocumentStore store;
+    store.add({1, "content"});
+
+    EXPECT_TRUE(store.remove(1));
+    EXPECT_FALSE(store.remove(1));
+    EXPECT_EQ(store.size(), 0u);
+}
+
+// ---------------------------------------------------------------------------
+// 53. Update then save/load round trip
+// ---------------------------------------------------------------------------
+
+TEST(DocumentStoreUpdate, UpdateSurvivesPersistence)
+{
+    const auto path = temp_path("update_persist");
+    TempFile guard{path};
+
+    DocumentStore store;
+    store.add({1, "original"});
+    store.save(path);
+
+    store.update({1, "updated"});
+    store.save(path);
+
+    DocumentStore loaded;
+    EXPECT_TRUE(loaded.load(path));
+    EXPECT_EQ(loaded.size(), 1u);
+    EXPECT_EQ(loaded.get(1)->content, "updated");
+}
+
+// ---------------------------------------------------------------------------
+// 54. Remove then save/load round trip
+// ---------------------------------------------------------------------------
+
+TEST(DocumentStoreRemove, RemoveSurvivesPersistence)
+{
+    const auto path = temp_path("remove_persist");
+    TempFile guard{path};
+
+    DocumentStore store;
+    store.add({1, "alpha"});
+    store.add({2, "beta"});
+    store.save(path);
+
+    store.remove(1);
+    store.save(path);
+
+    DocumentStore loaded;
+    EXPECT_TRUE(loaded.load(path));
+    EXPECT_EQ(loaded.size(), 1u);
+    EXPECT_FALSE(loaded.contains(1));
+    EXPECT_TRUE(loaded.contains(2));
+}
+
+// ---------------------------------------------------------------------------
+// 54. Update doc_id 0
+// ---------------------------------------------------------------------------
+
+TEST(DocumentStoreUpdate, UpdateDocIdZero)
+{
+    DocumentStore store;
+    store.add({0, "zero original"});
+
+    EXPECT_TRUE(store.update({0, "zero updated"}));
+
+    const auto doc = store.get(0);
+    ASSERT_TRUE(doc.has_value());
+    EXPECT_EQ(doc->content, "zero updated");
+}
+
+// ---------------------------------------------------------------------------
+// 55. Remove doc_id 0
+// ---------------------------------------------------------------------------
+
+TEST(DocumentStoreRemove, RemoveDocIdZero)
+{
+    DocumentStore store;
+    store.add({0, "zero"});
+    EXPECT_TRUE(store.remove(0));
+    EXPECT_FALSE(store.contains(0));
+    EXPECT_EQ(store.size(), 0u);
+}

@@ -108,6 +108,33 @@ protected:
         return {res->status, res->body};
     }
 
+    // Convenience: make a PUT request with a JSON body.
+    std::pair<int, std::string> put(const std::string& path,
+                                    const std::string& json_body) {
+        httplib::Client client("localhost", server_->port());
+        client.set_connection_timeout(5);
+        client.set_read_timeout(5);
+        auto res = client.Put(path.c_str(),
+                              json_body.c_str(),
+                              "application/json");
+        if (!res) {
+            return {0, ""};
+        }
+        return {res->status, res->body};
+    }
+
+    // Convenience: make a DELETE request.
+    std::pair<int, std::string> del(const std::string& path) {
+        httplib::Client client("localhost", server_->port());
+        client.set_connection_timeout(5);
+        client.set_read_timeout(5);
+        auto res = client.Delete(path.c_str());
+        if (!res) {
+            return {0, ""};
+        }
+        return {res->status, res->body};
+    }
+
     InvertedIndex index_;
     DocumentStore store_;
     std::unique_ptr<SearchService> service_;
@@ -695,6 +722,186 @@ TEST_F(HttpApiTest, IngestionResponseContentTypeIsJson)
     EXPECT_EQ(res->status, 201);
     EXPECT_NE(res->get_header_value("Content-Type").find("application/json"),
               std::string::npos);
+}
+
+// ===========================================================================
+// Phase 9: PUT /documents/{id} — Update Tests
+// ===========================================================================
+
+TEST_F(HttpApiTest, PutUpdateSuccessReturns200)
+{
+    start_server();
+
+    // Create a document first
+    post("/documents", R"({"id": 1000, "content": "original alpha"})");
+
+    // Update it
+    const auto [status, body] = put(
+        "/documents/1000",
+        R"({"content": "updated beta"})");
+    EXPECT_EQ(status, 200);
+
+    const auto j = nlohmann::json::parse(body);
+    EXPECT_EQ(j["document_id"], 1000u);
+    EXPECT_GE(j["terms_indexed"].get<std::size_t>(), 1u);
+}
+
+TEST_F(HttpApiTest, PutUpdateMissingDocumentReturns404)
+{
+    start_server();
+    const auto [status, body] = put(
+        "/documents/9999",
+        R"({"content": "new content"})");
+    EXPECT_EQ(status, 404);
+    const auto j = nlohmann::json::parse(body);
+    EXPECT_TRUE(j.contains("error"));
+}
+
+TEST_F(HttpApiTest, PutUpdateThenSearchFindsNewContent)
+{
+    start_server();
+
+    // Ingest with old content
+    post("/documents", R"({"id": 1001, "content": "alpha beta"})");
+
+    // Search for old content
+    auto [s1, b1] = get("/search?q=alpha");
+    auto j1 = nlohmann::json::parse(b1);
+    EXPECT_EQ(j1["total"], 1u);
+    EXPECT_EQ(j1["results"][0]["document_id"], 1001u);
+
+    // Update with new content
+    put("/documents/1001", R"({"content": "gamma delta"})");
+
+    // Old content no longer found
+    auto [s2, b2] = get("/search?q=alpha");
+    auto j2 = nlohmann::json::parse(b2);
+    EXPECT_EQ(j2["total"], 0u);
+
+    // New content found
+    auto [s3, b3] = get("/search?q=gamma");
+    auto j3 = nlohmann::json::parse(b3);
+    EXPECT_EQ(j3["total"], 1u);
+    EXPECT_EQ(j3["results"][0]["document_id"], 1001u);
+}
+
+TEST_F(HttpApiTest, PutInvalidContentReturns400)
+{
+    start_server();
+    post("/documents", R"({"id": 1002, "content": "original"})");
+
+    // Empty content
+    const auto [s1, b1] = put("/documents/1002", R"({"content": ""})");
+    EXPECT_EQ(s1, 400);
+}
+
+TEST_F(HttpApiTest, PutMalformedJsonReturns400)
+{
+    start_server();
+    post("/documents", R"({"id": 1003, "content": "original"})");
+
+    const auto [status, body] = put("/documents/1003", "not json");
+    EXPECT_EQ(status, 400);
+}
+
+TEST_F(HttpApiTest, PutMissingContentFieldReturns400)
+{
+    start_server();
+    post("/documents", R"({"id": 1004, "content": "original"})");
+
+    const auto [status, body] = put("/documents/1004", R"({})");
+    EXPECT_EQ(status, 400);
+}
+
+// ===========================================================================
+// Phase 9: DELETE /documents/{id} — Delete Tests
+// ===========================================================================
+
+TEST_F(HttpApiTest, DeleteSuccessReturns204)
+{
+    start_server();
+    post("/documents", R"({"id": 2000, "content": "to be deleted"})");
+
+    const auto [status, body] = del("/documents/2000");
+    EXPECT_EQ(status, 204);
+    EXPECT_TRUE(body.empty());
+}
+
+TEST_F(HttpApiTest, DeleteMissingDocumentReturns404)
+{
+    start_server();
+    const auto [status, body] = del("/documents/9999");
+    EXPECT_EQ(status, 404);
+    const auto j = nlohmann::json::parse(body);
+    EXPECT_TRUE(j.contains("error"));
+}
+
+TEST_F(HttpApiTest, DeleteThenSearchFindsNothing)
+{
+    start_server();
+    post("/documents",
+         R"({"id": 2001, "content": "unique_delete_test"})");
+
+    // Verify it's searchable
+    auto [s1, b1] = get("/search?q=unique_delete_test");
+    auto j1 = nlohmann::json::parse(b1);
+    EXPECT_EQ(j1["total"], 1u);
+
+    // Delete it
+    del("/documents/2001");
+
+    // No longer found
+    auto [s2, b2] = get("/search?q=unique_delete_test");
+    auto j2 = nlohmann::json::parse(b2);
+    EXPECT_EQ(j2["total"], 0u);
+}
+
+TEST_F(HttpApiTest, DeletePreservesOtherDocuments)
+{
+    start_server();
+    // Use terms that are unique to each document and don't share
+    // tokens. The tokenizer splits on non-alphanumeric characters,
+    // so "alpha beta" and "gamma delta" share no tokens.
+    post("/documents",
+         R"({"id": 2002, "content": "alpha beta"})");
+    post("/documents",
+         R"({"id": 2003, "content": "gamma delta"})");
+
+    // Delete doc 2002 — verify it returns 204
+    const auto [del_status, del_body] = del("/documents/2002");
+    EXPECT_EQ(del_status, 204);
+
+    // Doc 2003 still searchable
+    auto [s, b] = get("/search?q=gamma+delta");
+    auto j = nlohmann::json::parse(b);
+    EXPECT_EQ(j["total"], 1u);
+    EXPECT_EQ(j["results"][0]["document_id"], 2003u);
+
+    // Doc 2002 no longer searchable — "alpha" only existed in doc 2002
+    auto [s2, b2] = get("/search?q=alpha");
+    auto j2 = nlohmann::json::parse(b2);
+    EXPECT_EQ(j2["total"], 0u);
+}
+
+TEST_F(HttpApiTest, DeleteExistingThenReIngest)
+{
+    start_server();
+    post("/documents",
+         R"({"id": 2004, "content": "original content"})");
+
+    del("/documents/2004");
+
+    // Re-create with different content
+    const auto [s, b] = post(
+        "/documents",
+        R"({"id": 2004, "content": "new content"})");
+    EXPECT_EQ(s, 201);
+
+    // New content is searchable
+    auto [s2, b2] = get("/search?q=new+content");
+    auto j = nlohmann::json::parse(b2);
+    EXPECT_EQ(j["total"], 1u);
+    EXPECT_EQ(j["results"][0]["document_id"], 2004u);
 }
 
 } // namespace

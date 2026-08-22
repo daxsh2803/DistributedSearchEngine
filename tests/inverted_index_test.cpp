@@ -678,8 +678,178 @@ TEST(IndexSpanLifetime, CopySurvivesIndexModification)
     EXPECT_EQ(index.postings("cat").size(), 2u);
 }
 
+// ===========================================================================
+// 14. remove_document (Phase 9)
+// ===========================================================================
+
+TEST(IndexRemove, RemoveExistingDocument)
+{
+    InvertedIndex index;
+    index.add_document(1, "cat dog");
+    index.add_document(2, "cat bird");
+
+    EXPECT_TRUE(index.remove_document(1));
+
+    EXPECT_EQ(index.document_count(), 1u);
+    EXPECT_TRUE(index.contains("cat"));
+    EXPECT_FALSE(index.contains("dog"));  // only in doc 1
+
+    // "cat" now only has doc 2
+    expect_postings(index, "cat", {{2, 1}});
+    // "bird" unaffected
+    expect_postings(index, "bird", {{2, 1}});
+}
+
+TEST(IndexRemove, RemoveMissingDocumentReturnsFalse)
+{
+    InvertedIndex index;
+    index.add_document(1, "cat");
+
+    EXPECT_FALSE(index.remove_document(2));
+    EXPECT_FALSE(index.remove_document(999));
+    EXPECT_EQ(index.document_count(), 1u);  // unchanged
+}
+
+TEST(IndexRemove, RemoveUpdatesDocumentCount)
+{
+    InvertedIndex index;
+    index.add_document(1, "a");
+    index.add_document(2, "b");
+    index.add_document(3, "c");
+
+    EXPECT_EQ(index.document_count(), 3u);
+    index.remove_document(2);
+    EXPECT_EQ(index.document_count(), 2u);
+}
+
+TEST(IndexRemove, RemoveCleansPostings)
+{
+    InvertedIndex index;
+    // "dog" only in doc 1
+    index.add_document(1, "cat dog");
+    // "cat" in both docs
+    index.add_document(2, "cat");
+
+    index.remove_document(1);
+
+    // "dog" posting list should be removed entirely
+    EXPECT_FALSE(index.contains("dog"));
+    EXPECT_EQ(index.postings("dog").size(), 0u);
+
+    // "cat" posting list should only have doc 2
+    expect_postings(index, "cat", {{2, 1}});
+}
+
+TEST(IndexRemove, RemoveCleansEmptyTerms)
+{
+    InvertedIndex index;
+    // "unique" only in doc 1
+    index.add_document(1, "unique common");
+    index.add_document(2, "common");
+
+    index.remove_document(1);
+
+    // "unique" should be completely removed from vocabulary
+    EXPECT_FALSE(index.contains("unique"));
+    EXPECT_EQ(index.term_count(), 1u);  // only "common" remains
+}
+
+TEST(IndexRemove, RemovePreservesOtherDocuments)
+{
+    InvertedIndex index;
+    index.add_document(1, "alpha beta");
+    index.add_document(2, "beta gamma");
+    index.add_document(3, "alpha gamma delta");
+
+    index.remove_document(2);
+
+    expect_postings(index, "alpha", {{1, 1}, {3, 1}});
+    expect_postings(index, "beta", {{1, 1}});
+    expect_postings(index, "gamma", {{3, 1}});
+    expect_single_posting(index, "delta", 3, 1);
+    expect_sorted(index, "alpha");
+}
+
+TEST(IndexRemove, RemoveAndReAddDocument)
+{
+    InvertedIndex index;
+    index.add_document(1, "cat dog");
+
+    index.remove_document(1);
+    EXPECT_EQ(index.document_count(), 0u);
+
+    // Re-add with different content
+    index.add_document(1, "bird fish");
+    EXPECT_EQ(index.document_count(), 1u);
+
+    expect_single_posting(index, "bird", 1, 1);
+    expect_single_posting(index, "fish", 1, 1);
+    EXPECT_FALSE(index.contains("cat"));
+    EXPECT_FALSE(index.contains("dog"));
+}
+
+TEST(IndexRemove, RemoveAllDocumentsLeavesEmptyIndex)
+{
+    InvertedIndex index;
+    index.add_document(1, "alpha");
+    index.add_document(2, "beta");
+    index.add_document(3, "gamma");
+
+    index.remove_document(1);
+    index.remove_document(2);
+    index.remove_document(3);
+
+    EXPECT_EQ(index.document_count(), 0u);
+    EXPECT_EQ(index.term_count(), 0u);
+    EXPECT_FALSE(index.contains("alpha"));
+    EXPECT_FALSE(index.contains("beta"));
+    EXPECT_FALSE(index.contains("gamma"));
+}
+
+TEST(IndexRemove, PostingListsRemainSortedAfterRemoval)
+{
+    InvertedIndex index;
+    for (dse::doc_id i = 1; i <= 10; ++i) {
+        index.add_document(i, "common unique" + std::to_string(i));
+    }
+
+    // Remove documents 3, 5, 7
+    index.remove_document(3);
+    index.remove_document(5);
+    index.remove_document(7);
+
+    expect_sorted(index, "common");
+    expect_sorted(index, "unique3");  // should be empty
+    expect_sorted(index, "unique5");  // should be empty
+    EXPECT_FALSE(index.contains("unique3"));
+    EXPECT_FALSE(index.contains("unique5"));
+}
+
+TEST(IndexRemove, RepeatedRemovalIsSafe)
+{
+    InvertedIndex index;
+    index.add_document(1, "cat");
+
+    EXPECT_TRUE(index.remove_document(1));
+    EXPECT_FALSE(index.remove_document(1));
+    EXPECT_FALSE(index.remove_document(1));
+    EXPECT_EQ(index.document_count(), 0u);
+}
+
+TEST(IndexRemove, RemoveDocumentWithNoTokens)
+{
+    InvertedIndex index;
+    index.add_document(1, "cat");
+    index.add_document(2, "  ");  // no tokens
+
+    EXPECT_TRUE(index.remove_document(2));
+    EXPECT_EQ(index.document_count(), 1u);
+    EXPECT_EQ(index.term_count(), 1u);
+    expect_single_posting(index, "cat", 1, 1);
+}
+
 // ---------------------------------------------------------------------------
-// 13. Index <-> tokenizer integration
+// 15. Index <-> tokenizer integration
 // ---------------------------------------------------------------------------
 
 TEST(IndexTokenizerIntegration, HandComputedPostingsMatchTokenizerOutput)

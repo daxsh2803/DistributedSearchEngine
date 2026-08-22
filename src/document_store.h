@@ -42,10 +42,14 @@ struct Document {
 
 // Thread-safe in-memory document storage with JSONL persistence.
 //
-// Contract (Phase 6B-1 + 7A-1 + 8A-1):
+// Contract (Phase 6B-1 + 7A-1 + 8A-1 + 9):
 //   - documents are keyed by doc_id (reuses the same type as InvertedIndex);
 //   - add() stores a new document; returns false and does NOT overwrite if
 //     the ID already exists;
+//   - update() replaces an existing document's content; returns true if the
+//     document existed, false if the ID does not exist (never creates);
+//   - remove() deletes an existing document; returns true if removed,
+//     false if the ID did not exist;
 //   - get() returns std::nullopt for unknown IDs;
 //   - contains() and size() are O(1) average;
 //   - no validation is performed on content (empty, whitespace, etc.);
@@ -60,8 +64,9 @@ struct Document {
 //   - all public methods are thread-safe: multiple threads may call any
 //     combination of methods concurrently without data races.
 //
-// Complexity: O(1) average for add/get/contains; O(D) space where D is the
-// number of stored documents. Save is O(D log D + total content size).
+// Complexity: O(1) average for add/update/remove/get/contains; O(D) space
+// where D is the number of stored documents. Save is O(D log D + total
+// content size).
 class DocumentStore {
 public:
     // Default constructor: initializes the internal mutex.
@@ -72,6 +77,17 @@ public:
     // unchanged.
     // Thread-safe: acquires exclusive lock.
     bool add(Document document);
+
+    // Update an existing document's content. Returns true if the document
+    // existed and was updated, false if the ID does not exist (never creates
+    // a new document).
+    // Thread-safe: acquires exclusive lock.
+    bool update(Document document);
+
+    // Remove an existing document. Returns true if the document was removed,
+    // false if the ID did not exist.
+    // Thread-safe: acquires exclusive lock.
+    bool remove(doc_id id);
 
     // Return the stored document if present, or std::nullopt.
     // Thread-safe: acquires shared lock.

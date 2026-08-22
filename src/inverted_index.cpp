@@ -61,9 +61,61 @@ void InvertedIndex::add_document(doc_id id, std::string_view text)
                 return posting.document_id < value;
             });
         list.insert(pos, Posting{id, tf});
+
+        // Update reverse mapping: this document contains this term.
+        doc_terms_[id].insert(term);
     }
 
     ++document_count_;
+}
+
+bool InvertedIndex::remove_document(doc_id id)
+{
+    // Acquire exclusive lock for the entire mutation.
+    std::unique_lock lock(*mutex_);
+
+    // Check if the document exists in the documents set.
+    // (doc_terms_ may not have an entry for docs with no tokens.)
+    if (!documents_.contains(id)) {
+        return false;
+    }
+
+    // For each term in this document, remove its posting from the posting list.
+    auto terms_it = doc_terms_.find(id);
+    if (terms_it != doc_terms_.end()) {
+        for (const std::string& term : terms_it->second) {
+            auto term_it = postings_by_term_.find(term);
+            if (term_it == postings_by_term_.end()) {
+                continue;  // Should not happen, but be defensive.
+            }
+
+            auto& list = term_it->second;
+
+            // Find and remove the posting for this document.
+            auto pos = std::lower_bound(
+                list.begin(), list.end(), id,
+                [](const Posting& posting, doc_id value) {
+                    return posting.document_id < value;
+                });
+
+            if (pos != list.end() && pos->document_id == id) {
+                list.erase(pos);
+            }
+
+            // Clean up empty posting lists to keep the vocabulary clean.
+            if (list.empty()) {
+                postings_by_term_.erase(term_it);
+            }
+        }
+
+        doc_terms_.erase(terms_it);
+    }
+
+    // Remove from documents set and decrement count.
+    documents_.erase(id);
+    --document_count_;
+
+    return true;
 }
 
 std::vector<Posting> InvertedIndex::postings(std::string_view term) const

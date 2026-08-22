@@ -1,4 +1,4 @@
-// Distributed Search Engine - Ingestion Service (Phase 6B-2, 7A-2).
+// Distributed Search Engine - Ingestion Service (Phase 6B-2, 7A-2, 9).
 //
 // Implementation of the contract in src/ingestion_service.h:
 //   - validate request fields (id, content);
@@ -7,13 +7,17 @@
 //   - store raw text in DocumentStore;
 //   - index tokens via InvertedIndex;
 //   - persist DocumentStore to disk if data_path_ is configured;
-//   - report the number of distinct terms indexed.
+//   - report the number of distinct terms indexed;
+//   - update existing documents (Phase 9);
+//   - delete existing documents (Phase 9).
 
 #include "ingestion_service.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 
 #include "document_store.h"
 #include "inverted_index.h"
@@ -39,6 +43,7 @@ bool is_blank(const std::string& s)
 IngestionService::IngestionService(InvertedIndex& index, DocumentStore& store)
     : index_(index)
     , store_(store)
+    , mutation_mutex_(std::make_unique<SharedMutex>())
 {
 }
 
@@ -47,6 +52,7 @@ IngestionService::IngestionService(InvertedIndex& index, DocumentStore& store,
     : index_(index)
     , store_(store)
     , data_path_(data_path)
+    , mutation_mutex_(std::make_unique<SharedMutex>())
 {
 }
 
@@ -57,6 +63,14 @@ bool IngestionService::validate_request(const IngestDocumentRequest& request)
         return false;
     }
     return true;
+}
+
+bool IngestionService::persist_if_configured()
+{
+    if (data_path_.empty()) {
+        return true;  // No persistence configured.
+    }
+    return store_.save(data_path_);
 }
 
 IngestDocumentResponse IngestionService::ingest(
@@ -73,13 +87,12 @@ IngestDocumentResponse IngestionService::ingest(
         return response;
     }
 
+    // Service-level mutation coordination: serialize all create/update/delete
+    // operations to prevent interleaving of multi-component mutations.
+    std::unique_lock lock(*mutation_mutex_);
+
     // Atomic "check and claim": store_.add() returns false if a document
-    // with this ID already exists. This eliminates the TOCTOU race that
-    // existed when contains() and add() were separate operations.
-    //
-    // Thread-safety guarantee: if two threads ingest the same ID,
-    // exactly one succeeds (add() → true) and the other is rejected
-    // (add() → false → error response, index_.add_document() never called).
+    // with this ID already exists.
     if (!store_.add(Document{request.id, request.content})) {
         response.is_error = true;
         response.error_message =
@@ -89,12 +102,7 @@ IngestDocumentResponse IngestionService::ingest(
     }
 
     // Count distinct terms that will be indexed (for the response).
-    // We count BEFORE adding to the index so we can report accurately.
-    // The tokenizer produces the same tokens as InvertedIndex::add_document
-    // will use, so the distinct count is the same.
     const auto tokens = dse::tokenize(request.content);
-
-    // Use a set to count distinct terms (matching InvertedIndex behavior).
     std::unordered_set<std::string> distinct_terms;
     for (const auto& token : tokens) {
         distinct_terms.insert(token);
@@ -104,18 +112,103 @@ IngestDocumentResponse IngestionService::ingest(
     index_.add_document(request.id, request.content);
 
     // Persist to disk if persistence is configured.
-    // If persistence fails, report error — the in-memory state is
-    // correct but the document may not survive a restart.
-    if (!data_path_.empty()) {
-        if (!store_.save(data_path_)) {
-            response.is_error = true;
-            response.error_message =
-                "Document indexed but failed to persist to disk";
-            return response;
-        }
+    if (!persist_if_configured()) {
+        response.is_error = true;
+        response.error_message =
+            "Document indexed but failed to persist to disk";
+        return response;
     }
 
     response.terms_indexed = distinct_terms.size();
+    return response;
+}
+
+UpdateDocumentResponse IngestionService::update(
+    const UpdateDocumentRequest& request)
+{
+    UpdateDocumentResponse response;
+    response.document_id = request.id;
+
+    // Validate content.
+    if (request.content.empty() ||
+        std::all_of(request.content.begin(), request.content.end(),
+                    [](char c) { return c == ' ' || c == '\t' ||
+                                       c == '\n' || c == '\r'; })) {
+        response.is_error = true;
+        response.error_message =
+            "Invalid request: content must be non-empty and non-whitespace";
+        return response;
+    }
+
+    // Service-level mutation coordination.
+    std::unique_lock lock(*mutation_mutex_);
+
+    // Verify the document exists in the DocumentStore.
+    if (!store_.contains(request.id)) {
+        response.is_error = true;
+        response.error_message =
+            "Document with id " + std::to_string(request.id) +
+            " not found";
+        return response;
+    }
+
+    // Remove the old index representation.
+    index_.remove_document(request.id);
+
+    // Replace the content in DocumentStore.
+    store_.update(Document{request.id, request.content});
+
+    // Add the new index representation.
+    index_.add_document(request.id, request.content);
+
+    // Count distinct terms for the response.
+    const auto tokens = dse::tokenize(request.content);
+    std::unordered_set<std::string> distinct_terms;
+    for (const auto& token : tokens) {
+        distinct_terms.insert(token);
+    }
+
+    // Persist to disk if persistence is configured.
+    if (!persist_if_configured()) {
+        response.is_error = true;
+        response.error_message =
+            "Document updated but failed to persist to disk";
+        return response;
+    }
+
+    response.terms_indexed = distinct_terms.size();
+    return response;
+}
+
+DeleteDocumentResponse IngestionService::remove(doc_id id)
+{
+    DeleteDocumentResponse response;
+
+    // Service-level mutation coordination.
+    std::unique_lock lock(*mutation_mutex_);
+
+    // Verify the document exists in the DocumentStore.
+    if (!store_.contains(id)) {
+        response.is_error = true;
+        response.error_message =
+            "Document with id " + std::to_string(id) + " not found";
+        return response;
+    }
+
+    // Remove from the InvertedIndex.
+    index_.remove_document(id);
+
+    // Remove from the DocumentStore.
+    store_.remove(id);
+
+    // Persist to disk if persistence is configured.
+    if (!persist_if_configured()) {
+        response.is_error = true;
+        response.error_message =
+            "Document deleted but failed to persist to disk";
+        return response;
+    }
+
     return response;
 }
 

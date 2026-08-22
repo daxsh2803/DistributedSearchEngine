@@ -636,3 +636,270 @@ TEST(IngestionConcurrency, ConcurrentSearchAndIngestion)
     // All ingestions should have succeeded (unique IDs).
     EXPECT_EQ(successful_ingests.load(), kIngesters * 5);
 }
+
+// ===========================================================================
+// 16. Phase 9: Update and Delete Tests
+// ===========================================================================
+
+TEST(IngestionUpdate, SuccessfulUpdate)
+{
+    InvertedIndex index;
+    DocumentStore store;
+    IngestionService service(index, store);
+
+    service.ingest({1, "cat dog"});
+
+    const auto resp = service.update({1, "bird fish"});
+
+    EXPECT_FALSE(resp.is_error);
+    EXPECT_EQ(resp.document_id, 1u);
+    EXPECT_EQ(resp.terms_indexed, 2u);
+    EXPECT_EQ(store.size(), 1u);
+    EXPECT_EQ(index.document_count(), 1u);
+}
+
+TEST(IngestionUpdate, UpdateMissingDocumentReturnsError)
+{
+    InvertedIndex index;
+    DocumentStore store;
+    IngestionService service(index, store);
+
+    const auto resp = service.update({99, "new content"});
+
+    EXPECT_TRUE(resp.is_error);
+    EXPECT_NE(resp.error_message.find("not found"), std::string::npos);
+}
+
+TEST(IngestionUpdate, UpdateThenSearchFindsNewContent)
+{
+    InvertedIndex index;
+    DocumentStore store;
+    IngestionService service(index, store);
+
+    service.ingest({1, "alpha beta"});
+    service.update({1, "gamma delta"});
+
+    // Old terms should not find the document
+    const auto alpha_postings = index.postings("alpha");
+    EXPECT_TRUE(alpha_postings.empty());
+
+    // New terms should find the document
+    const auto gamma_postings = index.postings("gamma");
+    EXPECT_EQ(gamma_postings.size(), 1u);
+    EXPECT_EQ(gamma_postings[0].document_id, 1u);
+}
+
+TEST(IngestionUpdate, UpdatePreservesOtherDocuments)
+{
+    InvertedIndex index;
+    DocumentStore store;
+    IngestionService service(index, store);
+
+    service.ingest({1, "alpha"});
+    service.ingest({2, "beta"});
+
+    service.update({1, "alpha updated"});
+
+    EXPECT_TRUE(store.contains(1));
+    EXPECT_TRUE(store.contains(2));
+    EXPECT_EQ(store.size(), 2u);
+    EXPECT_EQ(index.document_count(), 2u);
+
+    const auto doc2 = store.get(2);
+    ASSERT_TRUE(doc2.has_value());
+    EXPECT_EQ(doc2->content, "beta");
+}
+
+TEST(IngestionUpdate, UpdateEmptyContentReturnsError)
+{
+    InvertedIndex index;
+    DocumentStore store;
+    IngestionService service(index, store);
+
+    service.ingest({1, "original"});
+
+    const auto resp = service.update({1, ""});
+    EXPECT_TRUE(resp.is_error);
+}
+
+TEST(IngestionUpdate, UpdateWhitespaceOnlyReturnsError)
+{
+    InvertedIndex index;
+    DocumentStore store;
+    IngestionService service(index, store);
+
+    service.ingest({1, "original"});
+
+    const auto resp = service.update({1, "   \t\n  "});
+    EXPECT_TRUE(resp.is_error);
+}
+
+TEST(IngestionDelete, SuccessfulDelete)
+{
+    InvertedIndex index;
+    DocumentStore store;
+    IngestionService service(index, store);
+
+    service.ingest({1, "alpha"});
+    service.ingest({2, "beta"});
+
+    const auto resp = service.remove(1);
+
+    EXPECT_FALSE(resp.is_error);
+    EXPECT_FALSE(store.contains(1));
+    EXPECT_TRUE(store.contains(2));
+    EXPECT_EQ(store.size(), 1u);
+    EXPECT_EQ(index.document_count(), 1u);
+}
+
+TEST(IngestionDelete, DeleteMissingDocumentReturnsError)
+{
+    InvertedIndex index;
+    DocumentStore store;
+    IngestionService service(index, store);
+
+    const auto resp = service.remove(99);
+
+    EXPECT_TRUE(resp.is_error);
+    EXPECT_NE(resp.error_message.find("not found"), std::string::npos);
+}
+
+TEST(IngestionDelete, DeletedDocumentNotInSearch)
+{
+    InvertedIndex index;
+    DocumentStore store;
+    IngestionService service(index, store);
+
+    service.ingest({1, "unique alpha"});
+    service.ingest({2, "beta"});
+
+    service.remove(1);
+
+    const auto alpha_postings = index.postings("unique");
+    EXPECT_TRUE(alpha_postings.empty());
+    const auto beta_postings = index.postings("beta");
+    EXPECT_EQ(beta_postings.size(), 1u);
+}
+
+TEST(IngestionDelete, DeletePreservesOtherDocuments)
+{
+    InvertedIndex index;
+    DocumentStore store;
+    IngestionService service(index, store);
+
+    service.ingest({1, "alpha"});
+    service.ingest({2, "beta"});
+    service.ingest({3, "gamma"});
+
+    service.remove(2);
+
+    EXPECT_TRUE(store.contains(1));
+    EXPECT_FALSE(store.contains(2));
+    EXPECT_TRUE(store.contains(3));
+    EXPECT_EQ(store.size(), 2u);
+    EXPECT_EQ(index.document_count(), 2u);
+}
+
+TEST(IngestionDelete, DocumentCountConsistentAfterDelete)
+{
+    InvertedIndex index;
+    DocumentStore store;
+    IngestionService service(index, store);
+
+    for (int i = 0; i < 5; ++i) {
+        service.ingest({static_cast<doc_id>(i),
+                        "content " + std::to_string(i)});
+    }
+
+    service.remove(2);
+    service.remove(4);
+
+    EXPECT_EQ(store.size(), index.document_count());
+    EXPECT_EQ(store.size(), 3u);
+}
+
+TEST(IngestionLifecycle, DeleteThenReIngest)
+{
+    InvertedIndex index;
+    DocumentStore store;
+    IngestionService service(index, store);
+
+    service.ingest({1, "alpha"});
+    service.remove(1);
+    service.ingest({1, "alpha new"});
+
+    EXPECT_EQ(store.size(), 1u);
+    EXPECT_EQ(index.document_count(), 1u);
+
+    const auto doc = store.get(1);
+    ASSERT_TRUE(doc.has_value());
+    EXPECT_EQ(doc->content, "alpha new");
+}
+
+TEST(IngestionLifecycle, UpdateThenDelete)
+{
+    InvertedIndex index;
+    DocumentStore store;
+    IngestionService service(index, store);
+
+    service.ingest({1, "original"});
+    service.update({1, "updated"});
+    service.remove(1);
+
+    EXPECT_FALSE(store.contains(1));
+    EXPECT_EQ(index.document_count(), 0u);
+}
+
+TEST(IngestionLifecycle, PersistenceAfterUpdate)
+{
+    const auto path = std::tmpnam(nullptr) + std::string("_update_persist.jsonl");
+    struct Guard { std::string p; ~Guard() { std::remove(p.c_str()); } } guard{path};
+
+    InvertedIndex index;
+    DocumentStore store;
+    IngestionService service(index, store, path);
+
+    service.ingest({1, "alpha"});
+    service.update({1, "alpha updated"});
+
+    // Reload from persistence
+    InvertedIndex index2;
+    DocumentStore store2;
+    EXPECT_TRUE(store2.load(path));
+    // Rebuild index from store
+    for (const auto& [id, doc] : store2.all()) {
+        index2.add_document(id, doc.content);
+    }
+
+    const auto doc = store2.get(1);
+    ASSERT_TRUE(doc.has_value());
+    EXPECT_EQ(doc->content, "alpha updated");
+    EXPECT_EQ(index2.document_count(), 1u);
+}
+
+TEST(IngestionLifecycle, PersistenceAfterDelete)
+{
+    const auto path = std::tmpnam(nullptr) + std::string("_delete_persist.jsonl");
+    struct Guard { std::string p; ~Guard() { std::remove(p.c_str()); } } guard{path};
+
+    InvertedIndex index;
+    DocumentStore store;
+    IngestionService service(index, store, path);
+
+    service.ingest({1, "alpha"});
+    service.ingest({2, "beta"});
+    service.remove(1);
+
+    // Reload from persistence
+    InvertedIndex index2;
+    DocumentStore store2;
+    EXPECT_TRUE(store2.load(path));
+    for (const auto& [id, doc] : store2.all()) {
+        index2.add_document(id, doc.content);
+    }
+
+    EXPECT_FALSE(store2.contains(1));
+    EXPECT_TRUE(store2.contains(2));
+    EXPECT_EQ(store2.size(), 1u);
+    EXPECT_EQ(index2.document_count(), 1u);
+}
