@@ -1,4 +1,4 @@
-// Distributed Search Engine - Application Entry Point (Phase 7A-2, Phase 10).
+// Distributed Search Engine - Application Entry Point (Phase 7A-2, 10, 11).
 //
 // Starts the HTTP server with document persistence across N shards.
 // On startup, loads persisted documents and rebuilds the inverted index
@@ -21,13 +21,13 @@
 //
 // Shutdown: press Ctrl+C (SIGINT) or send SIGTERM.
 
-#include "document_store.h"
 #include "http_server.h"
-#include "inverted_index.h"
+#include "local_node.h"
+#include "node_client.h"
+#include "node_config.h"
 #include "shard.h"
 #include "shard_coordinator.h"
 #include "shard_router.h"
-#include "tokenizer.h"
 
 #include <atomic>
 #include <csignal>
@@ -153,7 +153,7 @@ std::size_t resolve_shard_count(int argc, char* argv[])
 
 int main(int argc, char* argv[])
 {
-    std::cout << "Distributed Search Engine | Phase 10 - Shard Architecture\n";
+    std::cout << "Distributed Search Engine | Phase 11 - Node Abstraction\n";
     std::cout << "Built with C++ standard: " << __cplusplus << "\n\n";
 
     // --- Resolve configuration ---
@@ -162,37 +162,36 @@ int main(int argc, char* argv[])
     std::cout << "Data directory: " << data_dir << "\n";
     std::cout << "Shard count: " << shard_count << "\n";
 
-    // --- Create shards and router ---
+    // --- Create router ---
     auto router = std::make_unique<dse::ShardRouter>(shard_count);
-    std::vector<std::unique_ptr<dse::Shard>> shards;
-    shards.reserve(shard_count);
+
+    // --- Create placement: all shards on node 0 (single-node default) ---
+    std::vector<std::size_t> placement(shard_count, 0);
+    auto shard_placement = std::make_unique<dse::ShardPlacement>(
+        shard_count, 1, placement);
+
+    // --- Create node with shards ---
+    auto node = std::make_unique<dse::LocalNode>(0);
     for (std::size_t i = 0; i < shard_count; ++i) {
-        const std::string path = data_dir + "shard-" + std::to_string(i) + "/documents.jsonl";
-        shards.push_back(std::make_unique<dse::Shard>(path));
+        const std::string path = data_dir + "shard-" + std::to_string(i)
+                                + "/documents.jsonl";
+        node->add_shard(i, std::make_unique<dse::Shard>(path));
     }
+
+    std::vector<std::unique_ptr<dse::NodeClient>> nodes;
+    nodes.push_back(std::move(node));
 
     // --- Create coordinator ---
     auto coordinator = std::make_unique<dse::ShardCoordinator>(
-        std::move(router), std::move(shards));
+        std::move(router), std::move(shard_placement), std::move(nodes));
 
     // --- Startup recovery: load persisted documents or seed corpus ---
     bool loaded_persistence = false;
-    for (std::size_t i = 0; i < coordinator->shard_count(); ++i) {
-        if (coordinator->shard(i).document_count() > 0) {
-            loaded_persistence = true;
-            break;
-        }
-    }
 
-    if (!loaded_persistence) {
-        // Try loading from persistence paths.
-        coordinator->load_all();
-        for (std::size_t i = 0; i < coordinator->shard_count(); ++i) {
-            if (coordinator->shard(i).document_count() > 0) {
-                loaded_persistence = true;
-                break;
-            }
-        }
+    // Try loading from persistence paths.
+    coordinator->load_all();
+    if (coordinator->total_document_count() > 0) {
+        loaded_persistence = true;
     }
 
     if (loaded_persistence) {

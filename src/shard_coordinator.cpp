@@ -1,14 +1,16 @@
-// Distributed Search Engine - Shard Coordinator (Phase 10).
+// Distributed Search Engine - Shard Coordinator (Phase 11).
 //
 // Implementation of the contract in src/shard_coordinator.h.
-// Routes document operations to the owning shard via ShardRouter.
-// Performs cross-shard search with global TF-IDF statistics.
+// Routes operations through NodeClient, using ShardRouter for
+// doc_id → shard_id and ShardPlacement for shard_id → node_id.
 
 #include "shard_coordinator.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <functional>
+#include <future>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -17,8 +19,9 @@
 #include <vector>
 
 #include "inverted_index.h"
+#include "node_client.h"
+#include "node_config.h"
 #include "search_service.h"
-#include "shard.h"
 #include "shard_router.h"
 #include "tokenizer.h"
 
@@ -26,24 +29,55 @@ namespace dse {
 
 ShardCoordinator::ShardCoordinator(
     std::unique_ptr<ShardRouter> router,
-    std::vector<std::unique_ptr<Shard>> shards)
+    std::unique_ptr<ShardPlacement> placement,
+    std::vector<std::unique_ptr<NodeClient>> nodes)
     : router_(std::move(router))
-    , shards_(std::move(shards))
+    , placement_(std::move(placement))
+    , nodes_(std::move(nodes))
 {
 }
 
 // ---------------------------------------------------------------------------
-// Search: cross-shard with global TF-IDF
+// Private helpers
 // ---------------------------------------------------------------------------
+
+NodeClient& ShardCoordinator::node_for_shard(std::size_t shard_id) const
+{
+    const std::size_t node_id = placement_->node_of(shard_id);
+    return *nodes_[node_id];
+}
 
 std::vector<Posting> ShardCoordinator::collect_postings(
     std::string_view term) const
 {
-    std::vector<Posting> all;
+    const std::size_t n = router_->shard_count();
 
-    for (const auto& s : shards_) {
-        const auto local = s->index().postings(term);
-        all.insert(all.end(), local.begin(), local.end());
+    // Parallel fan-out: search all shards concurrently.
+    std::vector<std::future<ShardSearchResponse>> futures;
+    futures.reserve(n);
+
+    for (std::size_t sid = 0; sid < n; ++sid) {
+        futures.push_back(std::async(std::launch::async,
+            [this, sid, term]() {
+                NodeClient& nc = node_for_shard(sid);
+                ShardSearchRequest req;
+                req.shard_id = sid;
+                req.terms = {std::string(term)};
+                return nc.search(req);
+            }));
+    }
+
+    // Collect results.
+    std::vector<Posting> all;
+    for (auto& f : futures) {
+        auto resp = f.get();
+        if (resp.is_error || resp.terms_postings.empty()) {
+            continue;
+        }
+        const auto& postings = resp.terms_postings[0];
+        for (const auto& p : postings) {
+            all.push_back({p.document_id, p.term_frequency});
+        }
     }
 
     return all;
@@ -52,11 +86,18 @@ std::vector<Posting> ShardCoordinator::collect_postings(
 std::size_t ShardCoordinator::compute_global_n() const
 {
     std::size_t total = 0;
-    for (const auto& s : shards_) {
-        total += s->document_count();
+    for (std::size_t sid = 0; sid < router_->shard_count(); ++sid) {
+        NodeClient& nc = node_for_shard(sid);
+        ShardCountRequest req;
+        req.shard_id = sid;
+        total += nc.document_count(req).document_count;
     }
     return total;
 }
+
+// ---------------------------------------------------------------------------
+// Search: cross-shard with global TF-IDF via NodeClient
+// ---------------------------------------------------------------------------
 
 SearchResponse ShardCoordinator::search(const SearchRequest& request) const
 {
@@ -65,14 +106,12 @@ SearchResponse ShardCoordinator::search(const SearchRequest& request) const
     response.mode = (request.mode == SearchMode::And) ? "and" : "or";
     response.limit = request.limit;
 
-    // Validate.
     if (!SearchService::validate_request(request)) {
         response.is_error = true;
         response.error_message = "Invalid request: empty query or limit < 1";
         return response;
     }
 
-    // Tokenize and deduplicate query terms.
     const auto tokens = tokenize(request.query);
     if (tokens.empty()) {
         return response;
@@ -82,14 +121,12 @@ SearchResponse ShardCoordinator::search(const SearchRequest& request) const
     std::sort(terms.begin(), terms.end());
     terms.erase(std::unique(terms.begin(), terms.end()), terms.end());
 
-    // Global N.
     const double global_n = static_cast<double>(compute_global_n());
     if (global_n == 0.0) {
         return response;
     }
 
     if (request.mode == SearchMode::And) {
-        // --- AND mode: collect candidates from all shards, then intersect ---
         struct TermInfo {
             std::string term;
             std::vector<Posting> postings_list;
@@ -103,8 +140,7 @@ SearchResponse ShardCoordinator::search(const SearchRequest& request) const
             auto postings_list = collect_postings(term);
 
             if (postings_list.empty()) {
-                // Missing term poisons AND.
-                return response;
+                return response;  // Missing term poisons AND.
             }
 
             const double df = static_cast<double>(postings_list.size());
@@ -112,13 +148,12 @@ SearchResponse ShardCoordinator::search(const SearchRequest& request) const
             term_infos.push_back({term, std::move(postings_list), idf});
         }
 
-        // Sort by posting list size ascending (smallest-list-first).
+        // Smallest-list-first intersection.
         std::sort(term_infos.begin(), term_infos.end(),
                   [](const TermInfo& a, const TermInfo& b) {
                       return a.postings_list.size() < b.postings_list.size();
                   });
 
-        // Build candidate set via intersection.
         std::unordered_map<doc_id, double> scores;
         for (const auto& posting : term_infos[0].postings_list) {
             scores[posting.document_id] = 0.0;
@@ -137,7 +172,6 @@ SearchResponse ShardCoordinator::search(const SearchRequest& request) const
             }
         }
 
-        // Score candidates with global TF-IDF.
         for (const auto& info : term_infos) {
             for (const auto& posting : info.postings_list) {
                 auto it = scores.find(posting.document_id);
@@ -148,14 +182,12 @@ SearchResponse ShardCoordinator::search(const SearchRequest& request) const
             }
         }
 
-        // Convert to results.
         std::vector<SearchResult> results;
         results.reserve(scores.size());
         for (const auto& [doc, score] : scores) {
             results.push_back({doc, score});
         }
 
-        // Sort by score descending, tie-break by doc_id ascending.
         std::sort(results.begin(), results.end(),
                   [](const SearchResult& a, const SearchResult& b) {
                       if (a.score != b.score) {
@@ -172,14 +204,14 @@ SearchResponse ShardCoordinator::search(const SearchRequest& request) const
         }
 
     } else {
-        // --- OR mode: union of all matching documents across shards ---
+        // OR mode: union across all shards.
         std::unordered_map<doc_id, double> scores;
 
         for (const auto& term : terms) {
             const auto postings_list = collect_postings(term);
 
             if (postings_list.empty()) {
-                continue;  // Missing term: ignore in OR.
+                continue;
             }
 
             const double df = static_cast<double>(postings_list.size());
@@ -191,14 +223,12 @@ SearchResponse ShardCoordinator::search(const SearchRequest& request) const
             }
         }
 
-        // Convert to results.
         std::vector<SearchResult> results;
         results.reserve(scores.size());
         for (const auto& [doc, score] : scores) {
             results.push_back({doc, score});
         }
 
-        // Sort by score descending, tie-break by doc_id ascending.
         std::sort(results.begin(), results.end(),
                   [](const SearchResult& a, const SearchResult& b) {
                       if (a.score != b.score) {
@@ -228,14 +258,12 @@ CoordinatorIngestResponse ShardCoordinator::ingest(
     CoordinatorIngestResponse response;
     response.document_id = request.id;
 
-    // Validate content.
     if (request.content.empty()) {
         response.is_error = true;
         response.error_message = "Invalid request: content must be non-empty";
         return response;
     }
 
-    // Check for whitespace-only content.
     bool all_blank = true;
     for (const char c : request.content) {
         if (c != ' ' && c != '\t' && c != '\n' && c != '\r') {
@@ -249,28 +277,23 @@ CoordinatorIngestResponse ShardCoordinator::ingest(
         return response;
     }
 
-    // Route to owning shard.
-    const std::size_t idx = router_->route(request.id);
-    auto& target_shard = *shards_[idx];
+    const std::size_t shard_id = router_->route(request.id);
+    NodeClient& nc = node_for_shard(shard_id);
 
-    if (!target_shard.add_document(request.id, request.content)) {
+    ShardWriteRequest req;
+    req.shard_id = shard_id;
+    req.document_id = request.id;
+    req.content = request.content;
+
+    auto resp = nc.add_document(req);
+
+    if (resp.is_error) {
         response.is_error = true;
-        response.error_message =
-            "Document with id " + std::to_string(request.id) + " already exists";
+        response.error_message = std::move(resp.error_message);
         return response;
     }
 
-    // Persist the shard.
-    target_shard.save();
-
-    // Count distinct terms for response.
-    const auto tokens = tokenize(request.content);
-    std::unordered_set<std::string> distinct;
-    for (const auto& t : tokens) {
-        distinct.insert(t);
-    }
-    response.terms_indexed = distinct.size();
-
+    response.terms_indexed = resp.terms_indexed;
     return response;
 }
 
@@ -280,7 +303,6 @@ CoordinatorUpdateResponse ShardCoordinator::update(
     CoordinatorUpdateResponse response;
     response.document_id = request.id;
 
-    // Validate content.
     if (request.content.empty()) {
         response.is_error = true;
         response.error_message = "Invalid request: content must be non-empty";
@@ -300,28 +322,23 @@ CoordinatorUpdateResponse ShardCoordinator::update(
         return response;
     }
 
-    // Route to owning shard.
-    const std::size_t idx = router_->route(request.id);
-    auto& target_shard = *shards_[idx];
+    const std::size_t shard_id = router_->route(request.id);
+    NodeClient& nc = node_for_shard(shard_id);
 
-    if (!target_shard.update_document(request.id, request.content)) {
+    ShardWriteRequest req;
+    req.shard_id = shard_id;
+    req.document_id = request.id;
+    req.content = request.content;
+
+    auto resp = nc.update_document(req);
+
+    if (resp.is_error) {
         response.is_error = true;
-        response.error_message =
-            "Document with id " + std::to_string(request.id) + " not found";
+        response.error_message = std::move(resp.error_message);
         return response;
     }
 
-    // Persist the shard.
-    target_shard.save();
-
-    // Count distinct terms.
-    const auto tokens = tokenize(request.content);
-    std::unordered_set<std::string> distinct;
-    for (const auto& t : tokens) {
-        distinct.insert(t);
-    }
-    response.terms_indexed = distinct.size();
-
+    response.terms_indexed = resp.terms_indexed;
     return response;
 }
 
@@ -329,19 +346,20 @@ CoordinatorDeleteResponse ShardCoordinator::remove(doc_id id)
 {
     CoordinatorDeleteResponse response;
 
-    // Route to owning shard.
-    const std::size_t idx = router_->route(id);
-    auto& target_shard = *shards_[idx];
+    const std::size_t shard_id = router_->route(id);
+    NodeClient& nc = node_for_shard(shard_id);
 
-    if (!target_shard.remove_document(id)) {
+    ShardRemoveRequest req;
+    req.shard_id = shard_id;
+    req.document_id = id;
+
+    auto resp = nc.remove_document(req);
+
+    if (resp.is_error) {
         response.is_error = true;
-        response.error_message =
-            "Document with id " + std::to_string(id) + " not found";
+        response.error_message = std::move(resp.error_message);
         return response;
     }
-
-    // Persist the shard.
-    target_shard.save();
 
     return response;
 }
@@ -352,8 +370,20 @@ CoordinatorDeleteResponse ShardCoordinator::remove(doc_id id)
 
 std::optional<Document> ShardCoordinator::get_document(doc_id id) const
 {
-    const std::size_t idx = router_->route(id);
-    return shards_[idx]->get_document(id);
+    const std::size_t shard_id = router_->route(id);
+    NodeClient& nc = node_for_shard(shard_id);
+
+    ShardGetRequest req;
+    req.shard_id = shard_id;
+    req.document_id = id;
+
+    auto resp = nc.get_document(req);
+
+    if (!resp.found) {
+        return std::nullopt;
+    }
+
+    return Document{id, resp.content};
 }
 
 std::size_t ShardCoordinator::total_document_count() const
@@ -367,8 +397,9 @@ std::size_t ShardCoordinator::total_document_count() const
 
 bool ShardCoordinator::save_all() const
 {
-    for (const auto& s : shards_) {
-        if (!s->save()) {
+    for (std::size_t sid = 0; sid < router_->shard_count(); ++sid) {
+        NodeClient& nc = node_for_shard(sid);
+        if (!nc.save_shard(sid)) {
             return false;
         }
     }
@@ -377,8 +408,9 @@ bool ShardCoordinator::save_all() const
 
 bool ShardCoordinator::load_all()
 {
-    for (auto& s : shards_) {
-        s->load();  // Ignore per-shard failures; they are handled internally.
+    for (std::size_t sid = 0; sid < router_->shard_count(); ++sid) {
+        NodeClient& nc = node_for_shard(sid);
+        nc.load_shard(sid);  // Ignore per-shard failures.
     }
     return true;
 }
@@ -389,12 +421,17 @@ bool ShardCoordinator::load_all()
 
 std::size_t ShardCoordinator::shard_count() const
 {
-    return shards_.size();
+    return router_->shard_count();
 }
 
-const Shard& ShardCoordinator::shard(std::size_t index) const
+std::size_t ShardCoordinator::node_count() const
 {
-    return *shards_[index];
+    return nodes_.size();
+}
+
+const NodeClient& ShardCoordinator::node(std::size_t index) const
+{
+    return *nodes_[index];
 }
 
 } // namespace dse

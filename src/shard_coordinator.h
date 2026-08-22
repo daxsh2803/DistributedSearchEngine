@@ -1,40 +1,45 @@
-// Distributed Search Engine - Shard Coordinator (Phase 10).
+// Distributed Search Engine - Shard Coordinator (Phase 11).
 //
-// The ShardCoordinator manages multiple in-process shards and routes
-// document operations to the correct shard based on the ShardRouter.
+// The ShardCoordinator manages multiple nodes and routes document
+// operations to the correct shard via ShardRouter → ShardPlacement
+// → NodeClient.
 //
 // Responsibilities:
-//   - Write routing: create/update/delete/get all route to the owning shard.
-//   - Cross-shard search: collects postings from all shards, computes
-//     global TF-IDF statistics, and returns globally ranked results.
-//   - Persistence: delegates to each shard's own save/load.
+//   - Write routing: create/update/delete/get all route to the owning
+//     node via NodeClient.
+//   - Cross-shard search: collects postings from all shards through
+//     NodeClient, computes global TF-IDF statistics, and returns
+//     globally ranked results.
+//   - Persistence: delegates to each node's own save/load.
 //
-// The coordinator must NOT hold a global mutation mutex. Mutations on
-// different shards proceed independently. The coordinator only performs
-// read-only operations across shards during search.
+// The coordinator does NOT access Shard internals directly.
+// All shard access goes through the NodeClient interface.
 //
 // Thread safety:
-//   - search() is safe for concurrent use (read-only across shards).
-//   - ingest/update/remove are safe for concurrent use when targeting
-//     different shards. Same-shard mutations are serialized by the
-//     shard's internal mutex.
+//   - search() issues parallel std::async fan-out to nodes and
+//     computes global TF-IDF scoring.
+//   - ingest/update/remove route to the owning node; same-shard
+//     mutations are serialized by the shard's internal mutex.
 
 #pragma once
 
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
-#include "inverted_index.h"  // for doc_id, Posting
-#include "search_service.h"  // for SearchRequest, SearchResponse, etc.
-#include "shard.h"
+#include "document_store.h"  // for Document
+#include "inverted_index.h"   // for doc_id, Posting
+#include "node_client.h"
+#include "node_config.h"
+#include "search_service.h"   // for SearchRequest, SearchResponse
 #include "shard_router.h"
 
 namespace dse {
 
 // Request/response types for ingestion via coordinator.
-// Mirrors the IngestionService types for API compatibility.
 struct CoordinatorIngestRequest {
     doc_id id;
     std::string content;
@@ -66,13 +71,18 @@ struct CoordinatorDeleteResponse {
 
 class ShardCoordinator {
 public:
-    // Construct a coordinator with the given shards and router.
-    // The coordinator takes ownership of both via unique_ptr.
+    // Construct a coordinator with routing, placement, and nodes.
+    // The coordinator takes ownership of all provided objects.
+    //
+    // nodes must be indexed by node_id and contain at least
+    // placement.node_count() entries.
     ShardCoordinator(std::unique_ptr<ShardRouter> router,
-                     std::vector<std::unique_ptr<Shard>> shards);
+                     std::unique_ptr<ShardPlacement> placement,
+                     std::vector<std::unique_ptr<NodeClient>> nodes);
 
     // --- Search ---
     // Cross-shard search with global TF-IDF scoring.
+    // Issues parallel fan-out to all nodes via std::async.
     SearchResponse search(const SearchRequest& request) const;
 
     // --- Write operations ---
@@ -81,24 +91,26 @@ public:
     CoordinatorDeleteResponse remove(doc_id id);
 
     // --- Read operations ---
-    // Get a document by routing to the owning shard.
     std::optional<Document> get_document(doc_id id) const;
 
     // Total document count across all shards.
     std::size_t total_document_count() const;
 
     // --- Persistence ---
-    // Save all shards.
     bool save_all() const;
-
-    // Load all shards (startup recovery).
     bool load_all();
 
     // --- Accessors ---
     std::size_t shard_count() const;
-    const Shard& shard(std::size_t index) const;
+    std::size_t node_count() const;
+
+    // Get a node by index. For tests and diagnostics.
+    const NodeClient& node(std::size_t index) const;
 
 private:
+    // Find the NodeClient that owns a given shard.
+    NodeClient& node_for_shard(std::size_t shard_id) const;
+
     // Collect postings for a term across all shards.
     std::vector<Posting> collect_postings(std::string_view term) const;
 
@@ -106,7 +118,8 @@ private:
     std::size_t compute_global_n() const;
 
     std::unique_ptr<ShardRouter> router_;
-    std::vector<std::unique_ptr<Shard>> shards_;
+    std::unique_ptr<ShardPlacement> placement_;
+    std::vector<std::unique_ptr<NodeClient>> nodes_;
 };
 
 } // namespace dse

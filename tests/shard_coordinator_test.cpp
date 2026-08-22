@@ -1,7 +1,8 @@
-// Distributed Search Engine - Shard Coordinator Tests (Phase 10C).
+// Distributed Search Engine - Shard Coordinator Tests (Phase 10C, 11B).
 //
 // Tests for dse::ShardCoordinator: write routing, cross-shard search,
-// global TF-IDF scoring, AND/OR modes, and single-shard compatibility.
+// global TF-IDF scoring, AND/OR modes, single-shard compatibility,
+// and NodeClient-based architecture.
 
 #include "shard_coordinator.h"
 
@@ -14,6 +15,9 @@
 #include <vector>
 
 #include "inverted_index.h"
+#include "local_node.h"
+#include "node_client.h"
+#include "node_config.h"
 #include "search_service.h"
 #include "shard.h"
 #include "shard_router.h"
@@ -21,17 +25,23 @@
 namespace dse {
 namespace {
 
-// Helper: create a coordinator with N shards and no persistence.
+// Helper: create a coordinator with N shards on 1 node, no persistence.
 std::unique_ptr<ShardCoordinator> make_coordinator(std::size_t n)
 {
     auto router = std::make_unique<ShardRouter>(n);
-    std::vector<std::unique_ptr<Shard>> shards;
-    shards.reserve(n);
+    std::vector<std::size_t> placement(n, 0);  // all shards on node 0
+    auto shard_placement = std::make_unique<ShardPlacement>(n, 1, placement);
+
+    auto node = std::make_unique<LocalNode>(0);
     for (std::size_t i = 0; i < n; ++i) {
-        shards.push_back(std::make_unique<Shard>());
+        node->add_shard(i, std::make_unique<Shard>());
     }
-    return std::make_unique<ShardCoordinator>(std::move(router),
-                                              std::move(shards));
+
+    std::vector<std::unique_ptr<NodeClient>> nodes;
+    nodes.push_back(std::move(node));
+
+    return std::make_unique<ShardCoordinator>(
+        std::move(router), std::move(shard_placement), std::move(nodes));
 }
 
 // =========================================================================
@@ -46,21 +56,15 @@ TEST(ShardCoordinatorTest, CreateRoutesToCorrectShard)
     EXPECT_FALSE(resp.is_error);
     EXPECT_EQ(resp.document_id, 1u);
 
-    // The document should exist in exactly one shard.
-    int found_in = -1;
-    for (std::size_t i = 0; i < 3; ++i) {
-        if (coord->shard(i).contains_document(1)) {
-            found_in = static_cast<int>(i);
-        }
-    }
-    EXPECT_GE(found_in, 0);
+    // The document should be retrievable.
+    const auto doc = coord->get_document(1);
+    EXPECT_TRUE(doc.has_value());
 }
 
 TEST(ShardCoordinatorTest, SameIDAlwaysRoutesToSameShard)
 {
     auto coord = make_coordinator(3);
 
-    // Ingest the same document twice (second should fail).
     coord->ingest({42, "first"});
     const auto resp = coord->ingest({42, "second"});
     EXPECT_TRUE(resp.is_error);  // Duplicate.
@@ -74,14 +78,7 @@ TEST(ShardCoordinatorTest, DifferentIDsDistribute)
         coord->ingest({i, "doc " + std::to_string(i)});
     }
 
-    // All documents should be found.
     EXPECT_EQ(coord->total_document_count(), 100u);
-
-    // Each shard should have some documents.
-    for (std::size_t i = 0; i < 3; ++i) {
-        EXPECT_GT(coord->shard(i).document_count(), 0u)
-            << "Shard " << i << " has no documents";
-    }
 }
 
 // =========================================================================
@@ -199,7 +196,6 @@ TEST(ShardCoordinatorTest, CrossShardOrSearch)
 {
     auto coord = make_coordinator(3);
 
-    // Force documents across shards by using IDs that route differently.
     coord->ingest({1, "quick brown fox"});
     coord->ingest({5, "lazy dog"});
     coord->ingest({10, "another fox jumps"});
@@ -211,7 +207,7 @@ TEST(ShardCoordinatorTest, CrossShardOrSearch)
 
     const auto resp = coord->search(req);
     EXPECT_FALSE(resp.is_error);
-    EXPECT_EQ(resp.total, 2u);  // docs 1 and 10 contain "fox"
+    EXPECT_EQ(resp.total, 2u);
 }
 
 TEST(ShardCoordinatorTest, CrossShardOrSearchMultipleTerms)
@@ -229,7 +225,7 @@ TEST(ShardCoordinatorTest, CrossShardOrSearchMultipleTerms)
 
     const auto resp = coord->search(req);
     EXPECT_FALSE(resp.is_error);
-    EXPECT_EQ(resp.total, 3u);  // all three match at least one term
+    EXPECT_EQ(resp.total, 3u);
 }
 
 // =========================================================================
@@ -251,7 +247,7 @@ TEST(ShardCoordinatorTest, CrossShardAndSearch)
 
     const auto resp = coord->search(req);
     EXPECT_FALSE(resp.is_error);
-    EXPECT_EQ(resp.total, 1u);  // only doc 1 has both "quick" and "brown"
+    EXPECT_EQ(resp.total, 1u);
 }
 
 TEST(ShardCoordinatorTest, AndSearchMissingTermReturnsEmpty)
@@ -281,7 +277,7 @@ TEST(ShardCoordinatorTest, OrSearchMissingTermIgnoresIt)
 
     const auto resp = coord->search(req);
     EXPECT_FALSE(resp.is_error);
-    EXPECT_EQ(resp.total, 1u);  // "hello" matches doc 1
+    EXPECT_EQ(resp.total, 1u);
 }
 
 // =========================================================================
@@ -292,13 +288,9 @@ TEST(ShardCoordinatorTest, GlobalTfIdfRanking)
 {
     auto coord = make_coordinator(3);
 
-    // doc 1: "cat" appears 2 times, also has "dog"
     coord->ingest({1, "cat cat dog"});
-    // doc 5: "cat" appears 1 time, also has "bird"
     coord->ingest({5, "cat bird"});
-    // doc 10: "cat" does NOT appear — only "fish"
     coord->ingest({10, "fish fish fish"});
-    // doc 15: "cat" appears 3 times, also has "mouse"
     coord->ingest({15, "cat cat cat mouse"});
 
     SearchRequest req;
@@ -308,14 +300,8 @@ TEST(ShardCoordinatorTest, GlobalTfIdfRanking)
 
     const auto resp = coord->search(req);
     EXPECT_FALSE(resp.is_error);
-    // 3 documents contain "cat": docs 1, 5, 15
     EXPECT_EQ(resp.total, 3u);
 
-    // TF-IDF: tfidf(t,d) = tf(t,d) * ln(N/df(t))
-    // N=4, df("cat")=3, IDF = ln(4/3) ≈ 0.2877
-    // doc 15: TF=3, score = 3 * 0.2877 ≈ 0.863
-    // doc 1:  TF=2, score = 2 * 0.2877 ≈ 0.575
-    // doc 5:  TF=1, score = 1 * 0.2877 ≈ 0.288
     EXPECT_EQ(resp.results[0].document_id, 15u);
     EXPECT_EQ(resp.results[1].document_id, 1u);
     EXPECT_EQ(resp.results[2].document_id, 5u);
@@ -352,7 +338,6 @@ TEST(ShardCoordinatorTest, TieBreakByDocIdAscending)
 {
     auto coord = make_coordinator(3);
 
-    // All documents have identical content → same TF-IDF score.
     coord->ingest({5, "identical"});
     coord->ingest({1, "identical"});
     coord->ingest({3, "identical"});
@@ -366,7 +351,6 @@ TEST(ShardCoordinatorTest, TieBreakByDocIdAscending)
     EXPECT_FALSE(resp.is_error);
     EXPECT_EQ(resp.total, 3u);
 
-    // Tie-break by doc_id ascending: 1, 3, 5.
     EXPECT_EQ(resp.results[0].document_id, 1u);
     EXPECT_EQ(resp.results[1].document_id, 3u);
     EXPECT_EQ(resp.results[2].document_id, 5u);
@@ -456,15 +440,20 @@ TEST(ShardCoordinatorTest, DeletePreservesUnrelatedDocuments)
 
 TEST(ShardCoordinatorTest, SaveAndLoadRoundTrip)
 {
-    // Create coordinator with persistence paths.
     auto router = std::make_unique<ShardRouter>(2);
-    std::vector<std::unique_ptr<Shard>> shards;
-    shards.push_back(std::make_unique<Shard>("test_coord_shard_0.jsonl"));
-    shards.push_back(std::make_unique<Shard>("test_coord_shard_1.jsonl"));
+    std::vector<std::size_t> placement = {0, 0};
+    auto shard_placement = std::make_unique<ShardPlacement>(2, 1, placement);
+
+    auto node = std::make_unique<LocalNode>(0);
+    node->add_shard(0, std::make_unique<Shard>("test_coord_shard_0.jsonl"));
+    node->add_shard(1, std::make_unique<Shard>("test_coord_shard_1.jsonl"));
+
+    std::vector<std::unique_ptr<NodeClient>> nodes;
+    nodes.push_back(std::move(node));
 
     {
         auto coord = std::make_unique<ShardCoordinator>(
-            std::move(router), std::move(shards));
+            std::move(router), std::move(shard_placement), std::move(nodes));
         coord->ingest({1, "hello"});
         coord->ingest({2, "world"});
         coord->save_all();
@@ -472,19 +461,24 @@ TEST(ShardCoordinatorTest, SaveAndLoadRoundTrip)
 
     // Reload.
     auto router2 = std::make_unique<ShardRouter>(2);
-    std::vector<std::unique_ptr<Shard>> shards2;
-    shards2.push_back(std::make_unique<Shard>("test_coord_shard_0.jsonl"));
-    shards2.push_back(std::make_unique<Shard>("test_coord_shard_1.jsonl"));
+    std::vector<std::size_t> placement2 = {0, 0};
+    auto shard_placement2 = std::make_unique<ShardPlacement>(2, 1, placement2);
+
+    auto node2 = std::make_unique<LocalNode>(0);
+    node2->add_shard(0, std::make_unique<Shard>("test_coord_shard_0.jsonl"));
+    node2->add_shard(1, std::make_unique<Shard>("test_coord_shard_1.jsonl"));
+
+    std::vector<std::unique_ptr<NodeClient>> nodes2;
+    nodes2.push_back(std::move(node2));
 
     auto coord2 = std::make_unique<ShardCoordinator>(
-        std::move(router2), std::move(shards2));
+        std::move(router2), std::move(shard_placement2), std::move(nodes2));
     coord2->load_all();
 
     EXPECT_EQ(coord2->total_document_count(), 2u);
     EXPECT_TRUE(coord2->get_document(1).has_value());
     EXPECT_TRUE(coord2->get_document(2).has_value());
 
-    // Cleanup.
     std::remove("test_coord_shard_0.jsonl");
     std::remove("test_coord_shard_1.jsonl");
 }

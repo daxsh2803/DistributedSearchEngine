@@ -23,6 +23,9 @@
 #include <gtest/gtest.h>
 
 #include "http_server.h"
+#include "local_node.h"
+#include "node_client.h"
+#include "node_config.h"
 #include "shard.h"
 #include "shard_coordinator.h"
 #include "shard_router.h"
@@ -43,8 +46,11 @@
 namespace {
 
 using dse::doc_id;
+using dse::LocalNode;
+using dse::NodeClient;
 using dse::Shard;
 using dse::ShardCoordinator;
+using dse::ShardPlacement;
 using dse::ShardRouter;
 
 // ---------------------------------------------------------------------------
@@ -55,10 +61,14 @@ class HttpConcurrencyTest : public ::testing::Test {
 protected:
     void SetUp() override {
         auto router = std::make_unique<ShardRouter>(1);
-        std::vector<std::unique_ptr<Shard>> shards;
-        shards.push_back(std::make_unique<Shard>());
+        std::vector<std::size_t> placement = {0};
+        auto shard_placement = std::make_unique<ShardPlacement>(1, 1, placement);
+        auto node = std::make_unique<LocalNode>(0);
+        node->add_shard(0, std::make_unique<Shard>());
+        std::vector<std::unique_ptr<NodeClient>> nodes;
+        nodes.push_back(std::move(node));
         coordinator_ = std::make_unique<ShardCoordinator>(
-            std::move(router), std::move(shards));
+            std::move(router), std::move(shard_placement), std::move(nodes));
 
         // Seed with documents that have distinct terms for targeted searches.
         for (doc_id id = 1; id <= 20; ++id) {

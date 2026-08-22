@@ -10,6 +10,9 @@
 #include "http_server.h"
 #include "ingestion_service.h"
 #include "inverted_index.h"
+#include "local_node.h"
+#include "node_client.h"
+#include "node_config.h"
 #include "search_service.h"
 #include "shard.h"
 #include "shard_coordinator.h"
@@ -36,8 +39,11 @@ using dse::IngestionService;
 using dse::InvertedIndex;
 using dse::SearchService;
 using dse::doc_id;
+using dse::LocalNode;
+using dse::NodeClient;
 using dse::Shard;
 using dse::ShardCoordinator;
+using dse::ShardPlacement;
 using dse::ShardRouter;
 
 // Build the seed corpus identical to main.cpp via coordinator.
@@ -120,10 +126,14 @@ class AppIntegrationTest : public ::testing::Test {
 protected:
     void SetUp() override {
         auto router = std::make_unique<ShardRouter>(1);
-        std::vector<std::unique_ptr<Shard>> shards;
-        shards.push_back(std::make_unique<Shard>());
+        std::vector<std::size_t> placement = {0};
+        auto shard_placement = std::make_unique<ShardPlacement>(1, 1, placement);
+        auto node = std::make_unique<LocalNode>(0);
+        node->add_shard(0, std::make_unique<Shard>());
+        std::vector<std::unique_ptr<NodeClient>> nodes;
+        nodes.push_back(std::move(node));
         coordinator_ = std::make_unique<ShardCoordinator>(
-            std::move(router), std::move(shards));
+            std::move(router), std::move(shard_placement), std::move(nodes));
         load_seed_corpus(*coordinator_);
         server_ = std::make_unique<dse::HttpServer>(*coordinator_);
     }
