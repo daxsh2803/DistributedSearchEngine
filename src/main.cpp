@@ -1,8 +1,9 @@
-// Distributed Search Engine - Application Entry Point (Phase 7A-2).
+// Distributed Search Engine - Application Entry Point (Phase 7A-2, Phase 10).
 //
-// Starts the HTTP server with document persistence.
-// On startup, loads persisted documents and rebuilds the inverted index.
-// If no persistence file exists, loads a deterministic seed corpus.
+// Starts the HTTP server with document persistence across N shards.
+// On startup, loads persisted documents and rebuilds the inverted index
+// for each shard. If no persistence file exists, loads a deterministic
+// seed corpus.
 //
 // Configuration (first match wins):
 //   Port:
@@ -12,21 +13,27 @@
 //   Data path:
 //     1. --data <path>     command-line argument
 //     2. DSE_DATA=<path>   environment variable
-//     3. default: data/documents.jsonl
+//     3. default: data/
+//   Shards:
+//     1. --shards <number> command-line argument
+//     2. DSE_SHARDS=<number> environment variable
+//     3. default: 1
 //
 // Shutdown: press Ctrl+C (SIGINT) or send SIGTERM.
 
 #include "document_store.h"
 #include "http_server.h"
-#include "ingestion_service.h"
 #include "inverted_index.h"
-#include "search_service.h"
+#include "shard.h"
+#include "shard_coordinator.h"
+#include "shard_router.h"
 #include "tokenizer.h"
 
 #include <atomic>
 #include <csignal>
 #include <cstdlib>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -34,8 +41,6 @@
 
 namespace {
 
-// Global pointer to the server for signal handler access.
-// Safe because only one HttpServer exists, and stop() is thread-safe.
 std::atomic<dse::HttpServer*> g_server = nullptr;
 
 void signal_handler(int /*signum*/)
@@ -46,11 +51,10 @@ void signal_handler(int /*signum*/)
 }
 
 // ---------------------------------------------------------------------------
-// Seed corpus — small, deterministic demo data for first-run.
-// Only loaded when no persistence file exists.
+// Seed corpus
 // ---------------------------------------------------------------------------
 
-void load_seed_corpus(dse::IngestionService& ingestion)
+void load_seed_corpus(dse::ShardCoordinator& coord)
 {
     struct Doc {
         dse::doc_id id;
@@ -81,47 +85,29 @@ void load_seed_corpus(dse::IngestionService& ingestion)
     };
 
     for (const auto& doc : docs) {
-        ingestion.ingest({doc.id, std::string(doc.text)});
+        coord.ingest({doc.id, std::string(doc.text)});
     }
 }
 
 // ---------------------------------------------------------------------------
-// Rebuild the InvertedIndex from DocumentStore.
-// This demonstrates that the index is derived state.
+// Configuration
 // ---------------------------------------------------------------------------
 
-void rebuild_index(dse::InvertedIndex& index, const dse::DocumentStore& store)
+std::string resolve_data_dir(int argc, char* argv[])
 {
-    for (const auto& [id, doc] : store.all()) {
-        index.add_document(id, doc.content);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Command-line / environment configuration
-// ---------------------------------------------------------------------------
-
-std::string resolve_data_path(int argc, char* argv[])
-{
-    // 1. Command-line argument
     for (int i = 1; i < argc - 1; ++i) {
         if (std::string_view(argv[i]) == "--data") {
             return argv[i + 1];
         }
     }
-
-    // 2. Environment variable
     if (const char* env = std::getenv("DSE_DATA")) {
         return env;
     }
-
-    // 3. Default
-    return "data/documents.jsonl";
+    return "data/";
 }
 
 int resolve_port(int argc, char* argv[])
 {
-    // 1. Command-line argument
     for (int i = 1; i < argc - 1; ++i) {
         if (std::string_view(argv[i]) == "--port") {
             try {
@@ -132,50 +118,91 @@ int resolve_port(int argc, char* argv[])
             }
         }
     }
-
-    // 2. Environment variable
     if (const char* env = std::getenv("DSE_PORT")) {
         try {
             const int p = std::stoi(env);
             if (p > 0) return p;
         } catch (...) {}
     }
-
-    // 3. Default
     return 8080;
+}
+
+std::size_t resolve_shard_count(int argc, char* argv[])
+{
+    for (int i = 1; i < argc - 1; ++i) {
+        if (std::string_view(argv[i]) == "--shards") {
+            try {
+                const int n = std::stoi(argv[i + 1]);
+                if (n > 0) return static_cast<std::size_t>(n);
+            } catch (...) {
+                std::cerr << "Invalid shard count: " << argv[i + 1] << "\n";
+                return 1;
+            }
+        }
+    }
+    if (const char* env = std::getenv("DSE_SHARDS")) {
+        try {
+            const int n = std::stoi(env);
+            if (n > 0) return static_cast<std::size_t>(n);
+        } catch (...) {}
+    }
+    return 1;
 }
 
 } // namespace
 
 int main(int argc, char* argv[])
 {
-    std::cout << "Distributed Search Engine | Phase 7 - Document Persistence\n";
+    std::cout << "Distributed Search Engine | Phase 10 - Shard Architecture\n";
     std::cout << "Built with C++ standard: " << __cplusplus << "\n\n";
 
     // --- Resolve configuration ---
-    const std::string data_path = resolve_data_path(argc, argv);
-    std::cout << "Data path: " << data_path << "\n";
+    const std::string data_dir = resolve_data_dir(argc, argv);
+    const std::size_t shard_count = resolve_shard_count(argc, argv);
+    std::cout << "Data directory: " << data_dir << "\n";
+    std::cout << "Shard count: " << shard_count << "\n";
 
-    // --- Create storage components ---
-    dse::InvertedIndex index;
-    dse::DocumentStore store;
+    // --- Create shards and router ---
+    auto router = std::make_unique<dse::ShardRouter>(shard_count);
+    std::vector<std::unique_ptr<dse::Shard>> shards;
+    shards.reserve(shard_count);
+    for (std::size_t i = 0; i < shard_count; ++i) {
+        const std::string path = data_dir + "shard-" + std::to_string(i) + "/documents.jsonl";
+        shards.push_back(std::make_unique<dse::Shard>(path));
+    }
 
-    // --- Create the service layer (with persistence) ---
-    dse::IngestionService ingestion(index, store, data_path);
-    const dse::SearchService search(index);
+    // --- Create coordinator ---
+    auto coordinator = std::make_unique<dse::ShardCoordinator>(
+        std::move(router), std::move(shards));
 
     // --- Startup recovery: load persisted documents or seed corpus ---
-    if (store.load(data_path)) {
-        // Persistence file loaded successfully — rebuild index from documents.
-        rebuild_index(index, store);
-        std::cout << "Loaded " << index.document_count() << " persisted documents ("
-                  << index.term_count() << " distinct terms)\n";
+    bool loaded_persistence = false;
+    for (std::size_t i = 0; i < coordinator->shard_count(); ++i) {
+        if (coordinator->shard(i).document_count() > 0) {
+            loaded_persistence = true;
+            break;
+        }
+    }
+
+    if (!loaded_persistence) {
+        // Try loading from persistence paths.
+        coordinator->load_all();
+        for (std::size_t i = 0; i < coordinator->shard_count(); ++i) {
+            if (coordinator->shard(i).document_count() > 0) {
+                loaded_persistence = true;
+                break;
+            }
+        }
+    }
+
+    if (loaded_persistence) {
+        std::cout << "Loaded " << coordinator->total_document_count()
+                  << " persisted documents\n";
     } else {
-        // No persistence file (first run) — load seed corpus.
-        std::cout << "No persistence file found — loading seed corpus\n";
-        load_seed_corpus(ingestion);
-        std::cout << "Loaded " << index.document_count() << " seed documents ("
-                  << index.term_count() << " distinct terms)\n";
+        std::cout << "No persistence found — loading seed corpus\n";
+        load_seed_corpus(*coordinator);
+        std::cout << "Loaded " << coordinator->total_document_count()
+                  << " seed documents\n";
     }
 
     // --- Determine the port ---
@@ -186,10 +213,9 @@ int main(int argc, char* argv[])
     }
 
     // --- Start the HTTP server ---
-    dse::HttpServer server(search, ingestion);
+    dse::HttpServer server(*coordinator);
     g_server.store(&server);
 
-    // Install signal handlers for clean shutdown
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
 
@@ -209,7 +235,6 @@ int main(int argc, char* argv[])
               << "/search?q=quick+fox\"\n";
     std::cout << "\nPress Ctrl+C to stop.\n";
 
-    // --- Wait for shutdown ---
     server_thread.join();
     g_server.store(nullptr);
 

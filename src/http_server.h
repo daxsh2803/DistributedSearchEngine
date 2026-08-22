@@ -1,12 +1,11 @@
-// Distributed Search Engine - HTTP Server (Phase 5B-2).
+// Distributed Search Engine - HTTP Server (Phase 5B-2, Phase 10).
 //
-// Thin HTTP transport layer over SearchService. Owns the httplib::Server
-// and registers a single GET /search endpoint. All search logic flows
-// through SearchService — this class does nothing except translate
-// between HTTP and the SearchRequest/SearchResponse data model.
+// Thin HTTP transport layer over ShardCoordinator. Owns the httplib::Server
+// and registers GET /search, POST /documents, PUT /documents/:id,
+// DELETE /documents/:id. All logic flows through ShardCoordinator.
 //
 // Lifecycle:
-//   1. Construct HttpServer with a reference to SearchService.
+//   1. Construct HttpServer with a reference to ShardCoordinator.
 //   2. Call listen(port) to start the server (blocks until stop()).
 //   3. Call stop() from any thread to shut down gracefully.
 //   4. Destroy HttpServer — destructor calls stop() if still running.
@@ -21,20 +20,17 @@
 #include <memory>
 
 // Forward-declare httplib to keep this header lightweight.
-// The full implementation is only in http_server.cpp.
 namespace httplib {
 class Server;
 }
 
 namespace dse {
 
-class SearchService;
-class IngestionService;
+class ShardCoordinator;
 
 class HttpServer {
 public:
-    HttpServer(const SearchService& search,
-               IngestionService& ingestion);
+    explicit HttpServer(ShardCoordinator& coordinator);
     ~HttpServer();
 
     HttpServer(const HttpServer&) = delete;
@@ -42,24 +38,15 @@ public:
     HttpServer(HttpServer&&) = delete;
     HttpServer& operator=(HttpServer&&) = delete;
 
-    // Start the server on the given port. Blocks until stop() is called.
     bool listen(int port);
-
-    // Request a graceful shutdown. Safe to call from any thread.
     void stop();
-
-    // Block until the server is accepting connections.
     void wait_until_ready() const;
-
-    // Returns the port the server is actually listening on.
-    // Useful when port 0 was passed to listen() (OS-assigned port).
     int port() const;
 
 private:
     void register_routes();
 
-    const SearchService& search_;
-    IngestionService& ingestion_;
+    ShardCoordinator& coordinator_;
     std::unique_ptr<httplib::Server> server_;
     int port_ = 0;
 };

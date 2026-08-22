@@ -1,15 +1,14 @@
-// Distributed Search Engine - HTTP Server (Phase 5B-2, 9).
+// Distributed Search Engine - HTTP Server (Phase 5B-2, 9, 10).
 //
 // Implements the HTTP transport layer using cpp-httplib and nlohmann/json.
-// GET /search, POST /documents (Phase 5B-2/6), PUT /documents/:id,
-// DELETE /documents/:id (Phase 9).
+// Routes all requests through ShardCoordinator.
+// GET /search, POST /documents, PUT /documents/:id, DELETE /documents/:id.
 //
 // PUT/DELETE use httplib's PathParamsMatcher (/documents/:id) which is
 // portable across all platforms including MinGW/MSYS2.
 
 #include "http_server.h"
-#include "ingestion_service.h"
-#include "search_service.h"
+#include "shard_coordinator.h"
 
 #include <httplib.h>
 #include <nlohmann/json.hpp>
@@ -22,7 +21,6 @@ namespace dse {
 
 namespace {
 
-// Serialize a SearchResponse to a JSON string.
 std::string to_json(const SearchResponse& resp)
 {
     nlohmann::json j;
@@ -49,7 +47,6 @@ std::string to_json(const SearchResponse& resp)
     return j.dump();
 }
 
-// Error response helper
 void error_response(httplib::Response& res, int status, const std::string& msg)
 {
     res.status = status;
@@ -64,10 +61,8 @@ void error_response(httplib::Response& res, int status, const std::string& msg)
 // Lifecycle
 // ---------------------------------------------------------------------------
 
-HttpServer::HttpServer(const SearchService& search,
-                       IngestionService& ingestion)
-    : search_(search)
-    , ingestion_(ingestion)
+HttpServer::HttpServer(ShardCoordinator& coordinator)
+    : coordinator_(coordinator)
     , server_(std::make_unique<httplib::Server>())
 {
     register_routes();
@@ -146,7 +141,7 @@ void HttpServer::register_routes()
         }
 
         try {
-            const auto response = search_.search(request);
+            const auto response = coordinator_.search(request);
             if (response.is_error) {
                 error_response(res, 400, response.error_message);
                 return;
@@ -170,23 +165,23 @@ void HttpServer::register_routes()
                 return;
             }
 
-            IngestDocumentRequest request;
-
             if (!body.contains("id") || !body["id"].is_number_unsigned()) {
                 error_response(res, 400,
                     "Missing or invalid 'id' field (must be a non-negative integer)");
                 return;
             }
-            request.id = body["id"].get<doc_id>();
 
             if (!body.contains("content") || !body["content"].is_string()) {
                 error_response(res, 400,
                     "Missing or invalid 'content' field (must be a string)");
                 return;
             }
+
+            CoordinatorIngestRequest request;
+            request.id = body["id"].get<doc_id>();
             request.content = body["content"].get<std::string>();
 
-            const auto response = ingestion_.ingest(request);
+            const auto response = coordinator_.ingest(request);
 
             if (response.is_error) {
                 const bool is_conflict =
@@ -211,7 +206,6 @@ void HttpServer::register_routes()
     server_->Put("/documents/:id", [this](const httplib::Request& req,
                                            httplib::Response& res) {
         try {
-            // Extract document ID from path parameter.
             const auto it = req.path_params.find("id");
             if (it == req.path_params.end()) {
                 error_response(res, 400, "Missing document ID in URL");
@@ -226,7 +220,6 @@ void HttpServer::register_routes()
                 return;
             }
 
-            // Parse JSON body
             nlohmann::json body;
             try {
                 body = nlohmann::json::parse(req.body);
@@ -241,11 +234,11 @@ void HttpServer::register_routes()
                 return;
             }
 
-            UpdateDocumentRequest request;
+            CoordinatorUpdateRequest request;
             request.id = id;
             request.content = body["content"].get<std::string>();
 
-            const auto response = ingestion_.update(request);
+            const auto response = coordinator_.update(request);
 
             if (response.is_error) {
                 const bool is_not_found =
@@ -284,7 +277,7 @@ void HttpServer::register_routes()
                 return;
             }
 
-            const auto response = ingestion_.remove(id);
+            const auto response = coordinator_.remove(id);
 
             if (response.is_error) {
                 const bool is_not_found =

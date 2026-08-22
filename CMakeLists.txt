@@ -66,7 +66,10 @@ add_library(dse_core STATIC
     src/search_service.cpp
     src/http_server.cpp
     src/document_store.cpp
-    src/ingestion_service.cpp)
+    src/ingestion_service.cpp
+    src/shard_router.cpp
+    src/shard.cpp
+    src/shard_coordinator.cpp)
 target_include_directories(dse_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_options(dse_core PRIVATE ${PROJECT_WARNINGS})
 target_link_libraries(dse_core PUBLIC httplib::httplib nlohmann_json::nlohmann_json)
@@ -149,6 +152,18 @@ if(BUILD_TESTING)
     target_compile_options(http_concurrency_test PRIVATE ${PROJECT_WARNINGS})
     target_link_libraries(http_concurrency_test PRIVATE GTest::gtest_main dse_core)
 
+    add_executable(shard_router_test tests/shard_router_test.cpp)
+    target_compile_options(shard_router_test PRIVATE ${PROJECT_WARNINGS})
+    target_link_libraries(shard_router_test PRIVATE GTest::gtest_main dse_core)
+
+    add_executable(shard_test tests/shard_test.cpp)
+    target_compile_options(shard_test PRIVATE ${PROJECT_WARNINGS})
+    target_link_libraries(shard_test PRIVATE GTest::gtest_main dse_core)
+
+    add_executable(shard_coordinator_test tests/shard_coordinator_test.cpp)
+    target_compile_options(shard_coordinator_test PRIVATE ${PROJECT_WARNINGS})
+    target_link_libraries(shard_coordinator_test PRIVATE GTest::gtest_main dse_core)
+
     include(GoogleTest)
     gtest_discover_tests(smoke_test)
     gtest_discover_tests(tokenizer_test)
@@ -163,4 +178,7 @@ if(BUILD_TESTING)
     gtest_discover_tests(document_store_concurrency_test)
     gtest_discover_tests(inverted_index_concurrency_test)
     gtest_discover_tests(http_concurrency_test)
+    gtest_discover_tests(shard_router_test)
+    gtest_discover_tests(shard_test)
+    gtest_discover_tests(shard_coordinator_test)
 endif()

@@ -1,8 +1,8 @@
-// Distributed Search Engine - Application Integration Test (Phase 5B-3).
+// Distributed Search Engine - Application Integration Test (Phase 5B-3, Phase 10).
 //
 // Starts the real HTTP server with the seed corpus and verifies that
-// GET /search returns valid JSON results. This is a lightweight
-// application-level test — it does NOT duplicate the 19 HTTP API tests.
+// GET /search returns valid JSON results. Uses ShardCoordinator with
+// shard_count=1 for backward compatibility.
 
 #include <gtest/gtest.h>
 
@@ -11,6 +11,9 @@
 #include "ingestion_service.h"
 #include "inverted_index.h"
 #include "search_service.h"
+#include "shard.h"
+#include "shard_coordinator.h"
+#include "shard_router.h"
 #include "tokenizer.h"
 
 #include <httplib.h>
@@ -20,9 +23,11 @@
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
+#include <memory>
 #include <string>
 #include <thread>
 #include <chrono>
+#include <vector>
 
 namespace {
 
@@ -31,9 +36,12 @@ using dse::IngestionService;
 using dse::InvertedIndex;
 using dse::SearchService;
 using dse::doc_id;
+using dse::Shard;
+using dse::ShardCoordinator;
+using dse::ShardRouter;
 
-// Build the seed corpus identical to main.cpp.
-void load_seed_corpus(InvertedIndex& index)
+// Build the seed corpus identical to main.cpp via coordinator.
+void load_seed_corpus(ShardCoordinator& coord)
 {
     struct Doc {
         doc_id id;
@@ -64,12 +72,11 @@ void load_seed_corpus(InvertedIndex& index)
     };
 
     for (const auto& doc : docs) {
-        index.add_document(doc.id, doc.text);
+        coord.ingest({doc.id, std::string(doc.text)});
     }
 }
 
-// Rebuild the InvertedIndex from DocumentStore.
-// Demonstrates that the index is derived state.
+// Rebuild a shard's index from its DocumentStore.
 void rebuild_index(InvertedIndex& index, const DocumentStore& store)
 {
     for (const auto& [id, doc] : store.all()) {
@@ -77,19 +84,55 @@ void rebuild_index(InvertedIndex& index, const DocumentStore& store)
     }
 }
 
+// Build seed corpus directly into an InvertedIndex (for persistence tests).
+void load_seed_corpus_direct(InvertedIndex& index)
+{
+    struct Doc { doc_id id; std::string_view text; };
+    const std::vector<Doc> docs = {
+        {1, "The quick brown fox jumps over the lazy dog"},
+        {2, "A fast red fox leaps over a sleeping hound"},
+        {3, "The quick brown dog chases the lazy fox"},
+        {4, "C++ is a high-performance systems programming language"},
+        {5, "Rust is a systems language focused on memory safety"},
+        {6, "Python is a versatile scripting language"},
+        {7, "The Linux kernel is written in C"},
+        {8, "Git is a distributed version control system"},
+        {9, "Docker containers package applications for deployment"},
+        {10, "A search engine indexes documents for fast retrieval"},
+        {11, "Inverted maps map terms to document lists"},
+        {12, "TF-IDF scores term importance across documents"},
+        {13, "PostgreSQL is a relational database management system"},
+        {14, "Redis is an in-memory key-value store"},
+        {15, "Kafka handles high-throughput event streaming"},
+        {16, "Kubernetes orchestrates containerized applications"},
+        {17, "Machine learning models learn patterns from data"},
+        {18, "Neural networks are inspired by biological neurons"},
+        {19, "Web browsers render HTML and execute JavaScript"},
+        {20, "HTTP is the foundation of data communication on the web"},
+    };
+    for (const auto& doc : docs) {
+        index.add_document(doc.id, doc.text);
+    }
+}
+
 // Test fixture: starts server with seed corpus, tears down after.
 class AppIntegrationTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        load_seed_corpus(index_);
-        service_ = std::make_unique<SearchService>(index_);
-        ingestion_ = std::make_unique<IngestionService>(index_, store_);
-        server_  = std::make_unique<dse::HttpServer>(*service_, *ingestion_);
+        auto router = std::make_unique<ShardRouter>(1);
+        std::vector<std::unique_ptr<Shard>> shards;
+        shards.push_back(std::make_unique<Shard>());
+        coordinator_ = std::make_unique<ShardCoordinator>(
+            std::move(router), std::move(shards));
+        load_seed_corpus(*coordinator_);
+        server_ = std::make_unique<dse::HttpServer>(*coordinator_);
     }
+
+
 
     void start_server() {
         server_thread_ = std::thread([this]() {
-            server_->listen(0);  // OS-assigned port
+            server_->listen(0);
         });
         server_->wait_until_ready();
     }
@@ -122,10 +165,7 @@ protected:
         return {res->status, res->body};
     }
 
-    InvertedIndex index_;
-    DocumentStore store_;
-    std::unique_ptr<SearchService> service_;
-    std::unique_ptr<IngestionService> ingestion_;
+    std::unique_ptr<ShardCoordinator> coordinator_;
     std::unique_ptr<dse::HttpServer> server_;
     std::thread server_thread_;
 };
@@ -318,19 +358,11 @@ TEST_F(AppIntegrationTest, ExistingSearchPreservedAfterIngestion)
 
 namespace {
 
-using dse::DocumentStore;
-using dse::IngestionService;
-using dse::InvertedIndex;
-using dse::SearchService;
-using dse::doc_id;
-
-// Helper: create a unique temporary file path for tests.
 std::string persist_temp_path(const std::string& name)
 {
     return std::tmpnam(nullptr) + std::string("_") + name + ".jsonl";
 }
 
-// RAII helper: removes a file on destruction.
 struct PersistTempFile {
     std::string path;
     ~PersistTempFile() { std::remove(path.c_str()); }
@@ -349,9 +381,9 @@ TEST(PersistenceStartup, LoadedDocumentBecomesSearchable)
 
     // Phase 1: Ingest a unique document, let it persist.
     {
-        InvertedIndex index;
-        DocumentStore store;
-        IngestionService ingestion(index, store, path);
+        dse::InvertedIndex index;
+        dse::DocumentStore store;
+        dse::IngestionService ingestion(index, store, path);
 
         // Ingest a unique document
         const auto resp = ingestion.ingest({9000, "unique persistence test"});
@@ -364,11 +396,11 @@ TEST(PersistenceStartup, LoadedDocumentBecomesSearchable)
 
     // Phase 2: Start fresh, load from persistence, rebuild index.
     {
-        InvertedIndex index;
-        DocumentStore store;
+        dse::InvertedIndex index;
+        dse::DocumentStore store;
         EXPECT_TRUE(store.load(path));  // Load persisted documents
         rebuild_index(index, store);     // Rebuild index from documents
-        const SearchService search(index);
+        const dse::SearchService search(index);
 
         // The persisted document should be searchable
         EXPECT_EQ(store.size(), 1u);
@@ -389,8 +421,8 @@ TEST(PersistenceStartup, MissingFileUsesSeedCorpus)
     const auto path = persist_temp_path("nofile");
     // No guard — file doesn't exist
 
-    InvertedIndex index;
-    DocumentStore store;
+    dse::InvertedIndex index;
+    dse::DocumentStore store;
 
     // load() returns false when file doesn't exist
     EXPECT_FALSE(store.load(path));
@@ -399,7 +431,7 @@ TEST(PersistenceStartup, MissingFileUsesSeedCorpus)
     EXPECT_EQ(store.size(), 0u);
 
     // Load seed corpus directly into the index
-    load_seed_corpus(index);
+    load_seed_corpus_direct(index);
 
     // Seed corpus loaded
     EXPECT_EQ(index.document_count(), 20u);
@@ -416,10 +448,10 @@ TEST(PersistenceStartup, IngestedDocumentSurvivesRestart)
 
     // Session 1: ingest a document
     {
-        InvertedIndex index;
-        DocumentStore store;
-        IngestionService ingestion(index, store, path);
-        const SearchService search(index);
+        dse::InvertedIndex index;
+        dse::DocumentStore store;
+        dse::IngestionService ingestion(index, store, path);
+        const dse::SearchService search(index);
 
         const auto resp = ingestion.ingest({7777, "survives the restart"});
         EXPECT_FALSE(resp.is_error);
@@ -427,8 +459,8 @@ TEST(PersistenceStartup, IngestedDocumentSurvivesRestart)
 
     // Session 2: load from persistence
     {
-        InvertedIndex index;
-        DocumentStore store;
+        dse::InvertedIndex index;
+        dse::DocumentStore store;
         EXPECT_TRUE(store.load(path));
         rebuild_index(index, store);
 
@@ -457,8 +489,8 @@ TEST(PersistenceStartup, MalformedRecordsSkippedWithWarning)
         ofs << R"({"id": 2, "content": "good two"})" << "\n";
     }
 
-    InvertedIndex index;
-    DocumentStore store;
+    dse::InvertedIndex index;
+    dse::DocumentStore store;
 
     // load() returns true (file opened), even with corrupt lines
     EXPECT_TRUE(store.load(path));
@@ -475,11 +507,11 @@ TEST(PersistenceStartup, MalformedRecordsSkippedWithWarning)
 
 TEST(PersistenceStartup, PersistenceFailureReportsError)
 {
-    InvertedIndex index;
-    DocumentStore store;
+    dse::InvertedIndex index;
+    dse::DocumentStore store;
 
     // Use a path that cannot be written to (invalid directory)
-    IngestionService ingestion(index, store, "/nonexistent/dir/file.jsonl");
+    dse::IngestionService ingestion(index, store, "/nonexistent/dir/file.jsonl");
 
     const auto resp = ingestion.ingest({1, "test"});
 
@@ -502,12 +534,12 @@ TEST(PersistenceStartup, SearchBehaviorUnchanged)
     PersistTempFile guard{path};
 
     // Load seed corpus directly into the index
-    InvertedIndex index;
-    DocumentStore store;
-    load_seed_corpus(index);
+    dse::InvertedIndex index;
+    dse::DocumentStore store;
+    load_seed_corpus_direct(index);
 
     // AND mode works
-    const SearchService search(index);
+    const dse::SearchService search(index);
     const auto r1 = search.search({"quick fox", dse::SearchMode::And, 10});
     EXPECT_GE(r1.total, 1u);
 
@@ -527,17 +559,17 @@ TEST(PersistenceStartup, IndexRebuiltFromDocumentStore)
 
     // Create and persist some documents
     {
-        InvertedIndex index;
-        DocumentStore store;
-        IngestionService ingestion(index, store, path);
+        dse::InvertedIndex index;
+        dse::DocumentStore store;
+        dse::IngestionService ingestion(index, store, path);
         ingestion.ingest({1, "alpha beta"});
         ingestion.ingest({2, "beta gamma"});
     }
 
     // Create a fresh index and rebuild from loaded documents
     {
-        InvertedIndex index;
-        DocumentStore store;
+        dse::InvertedIndex index;
+        dse::DocumentStore store;
         EXPECT_TRUE(store.load(path));
 
         // Index is empty before rebuild
@@ -551,7 +583,7 @@ TEST(PersistenceStartup, IndexRebuiltFromDocumentStore)
         EXPECT_EQ(index.term_count(), 3u);  // alpha, beta, gamma
 
         // Search works
-        const SearchService search(index);
+        const dse::SearchService search(index);
         const auto results = search.search({"beta", dse::SearchMode::Or, 10});
         EXPECT_EQ(results.total, 2u);
     }

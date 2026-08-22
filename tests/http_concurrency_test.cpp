@@ -22,11 +22,10 @@
 
 #include <gtest/gtest.h>
 
-#include "document_store.h"
 #include "http_server.h"
-#include "ingestion_service.h"
-#include "inverted_index.h"
-#include "search_service.h"
+#include "shard.h"
+#include "shard_coordinator.h"
+#include "shard_router.h"
 #include "tokenizer.h"
 
 #include <httplib.h>
@@ -35,6 +34,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -42,28 +42,30 @@
 
 namespace {
 
-using dse::DocumentStore;
-using dse::IngestionService;
-using dse::InvertedIndex;
-using dse::SearchService;
 using dse::doc_id;
+using dse::Shard;
+using dse::ShardCoordinator;
+using dse::ShardRouter;
 
 // ---------------------------------------------------------------------------
-// Test fixture
+// Test fixture: single-shard coordinator for backward-compatible concurrency tests
 // ---------------------------------------------------------------------------
 
 class HttpConcurrencyTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        // Seed the index with documents that have distinct terms for targeted
-        // concurrent searches.
+        auto router = std::make_unique<ShardRouter>(1);
+        std::vector<std::unique_ptr<Shard>> shards;
+        shards.push_back(std::make_unique<Shard>());
+        coordinator_ = std::make_unique<ShardCoordinator>(
+            std::move(router), std::move(shards));
+
+        // Seed with documents that have distinct terms for targeted searches.
         for (doc_id id = 1; id <= 20; ++id) {
-            index_.add_document(id,
-                "document " + std::to_string(id) + " content term" + std::to_string(id));
+            coordinator_->ingest({id,
+                "document " + std::to_string(id) + " content term" + std::to_string(id)});
         }
-        service_ = std::make_unique<SearchService>(index_);
-        ingestion_ = std::make_unique<IngestionService>(index_, store_);
-        server_ = std::make_unique<dse::HttpServer>(*service_, *ingestion_);
+        server_ = std::make_unique<dse::HttpServer>(*coordinator_);
     }
 
     void start_server() {
@@ -80,7 +82,6 @@ protected:
         }
     }
 
-    // GET request helper.
     std::pair<int, std::string> get(const std::string& path) {
         httplib::Client client("localhost", server_->port());
         client.set_connection_timeout(5);
@@ -90,7 +91,6 @@ protected:
         return {res->status, res->body};
     }
 
-    // POST request helper.
     std::pair<int, std::string> post(const std::string& path,
                                      const std::string& json_body) {
         httplib::Client client("localhost", server_->port());
@@ -103,10 +103,7 @@ protected:
         return {res->status, res->body};
     }
 
-    InvertedIndex index_;
-    DocumentStore store_;
-    std::unique_ptr<SearchService> service_;
-    std::unique_ptr<IngestionService> ingestion_;
+    std::unique_ptr<ShardCoordinator> coordinator_;
     std::unique_ptr<dse::HttpServer> server_;
     std::thread server_thread_;
 };

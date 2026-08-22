@@ -1,23 +1,21 @@
-// Distributed Search Engine - HTTP API Integration Tests (Phase 5B-2).
+// Distributed Search Engine - HTTP API Integration Tests (Phase 5B-2, Phase 10).
 //
 // Real HTTP requests against a localhost server using cpp-httplib's
-// client. Tests verify the full stack: HTTP transport → SearchService
-// → Ranker → InvertedIndex.
+// client. Tests verify the full stack: HTTP transport → ShardCoordinator
+// → Shards → InvertedIndex + DocumentStore.
 //
 // Lifecycle:
 //   - Each test starts an HttpServer on an OS-assigned port (port 0).
 //   - The server runs in a background thread.
-//   - httplib::Client sends real HTTP GET /search requests.
+//   - httplib::Client sends real HTTP requests.
 //   - After assertions, the server is stopped and the thread is joined.
 
 #include <gtest/gtest.h>
 
-#include "document_store.h"
 #include "http_server.h"
-#include "ingestion_service.h"
-#include "inverted_index.h"
-#include "ranker.h"
-#include "search_service.h"
+#include "shard.h"
+#include "shard_coordinator.h"
+#include "shard_router.h"
 #include "tokenizer.h"
 
 #include <httplib.h>
@@ -26,51 +24,44 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
 
 namespace {
 
-using dse::DocumentStore;
-using dse::IngestionService;
-using dse::InvertedIndex;
 using dse::SearchMode;
-using dse::SearchService;
 using dse::doc_id;
+using dse::Shard;
+using dse::ShardCoordinator;
+using dse::ShardRouter;
 
-// Build an InvertedIndex from a list of (id, text) pairs.
-InvertedIndex build_index(
-    std::initializer_list<std::pair<doc_id, std::string_view>> docs)
-{
-    InvertedIndex index;
-    for (const auto& [id, text] : docs) {
-        index.add_document(id, text);
-    }
-    return index;
-}
-
-// Test fixture: starts an HTTP server per test, tears it down after.
+// Test fixture: starts an HTTP server with a single-shard coordinator
+// per test, tears it down after. Uses shard_count=1 for backward
+// compatibility with existing test assumptions.
 class HttpApiTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        index_ = build_index({
-            {1, "the quick brown fox"},
-            {2, "the lazy dog"},
-            {3, "the quick brown dog"},
-            {4, "the fox and the dog"},
-        });
-        service_ = std::make_unique<SearchService>(index_);
-        // IngestionService is not used in these tests but required by HttpServer
-        ingestion_ = std::make_unique<IngestionService>(index_, store_);
-        server_  = std::make_unique<dse::HttpServer>(*service_, *ingestion_);
+        auto router = std::make_unique<ShardRouter>(1);
+        std::vector<std::unique_ptr<Shard>> shards;
+        shards.push_back(std::make_unique<Shard>());
+        coordinator_ = std::make_unique<ShardCoordinator>(
+            std::move(router), std::move(shards));
+
+        // Pre-populate with the same documents the old tests used.
+        coordinator_->ingest({1, "the quick brown fox"});
+        coordinator_->ingest({2, "the lazy dog"});
+        coordinator_->ingest({3, "the quick brown dog"});
+        coordinator_->ingest({4, "the fox and the dog"});
+
+        server_ = std::make_unique<dse::HttpServer>(*coordinator_);
     }
 
     void start_server() {
         server_thread_ = std::thread([this]() {
-            server_->listen(0);  // OS-assigned port
+            server_->listen(0);
         });
-        // Block until the server is actually accepting connections.
         server_->wait_until_ready();
     }
 
@@ -81,19 +72,15 @@ protected:
         }
     }
 
-    // Convenience: make a GET request and return the response body + status.
     std::pair<int, std::string> get(const std::string& path) {
         httplib::Client client("localhost", server_->port());
         client.set_connection_timeout(5);
         client.set_read_timeout(5);
         auto res = client.Get(path);
-        if (!res) {
-            return {0, ""};
-        }
+        if (!res) return {0, ""};
         return {res->status, res->body};
     }
 
-    // Convenience: make a POST request with a JSON body.
     std::pair<int, std::string> post(const std::string& path,
                                      const std::string& json_body) {
         httplib::Client client("localhost", server_->port());
@@ -102,13 +89,10 @@ protected:
         auto res = client.Post(path.c_str(),
                                json_body.c_str(),
                                "application/json");
-        if (!res) {
-            return {0, ""};
-        }
+        if (!res) return {0, ""};
         return {res->status, res->body};
     }
 
-    // Convenience: make a PUT request with a JSON body.
     std::pair<int, std::string> put(const std::string& path,
                                     const std::string& json_body) {
         httplib::Client client("localhost", server_->port());
@@ -117,28 +101,20 @@ protected:
         auto res = client.Put(path.c_str(),
                               json_body.c_str(),
                               "application/json");
-        if (!res) {
-            return {0, ""};
-        }
+        if (!res) return {0, ""};
         return {res->status, res->body};
     }
 
-    // Convenience: make a DELETE request.
     std::pair<int, std::string> del(const std::string& path) {
         httplib::Client client("localhost", server_->port());
         client.set_connection_timeout(5);
         client.set_read_timeout(5);
         auto res = client.Delete(path.c_str());
-        if (!res) {
-            return {0, ""};
-        }
+        if (!res) return {0, ""};
         return {res->status, res->body};
     }
 
-    InvertedIndex index_;
-    DocumentStore store_;
-    std::unique_ptr<SearchService> service_;
-    std::unique_ptr<dse::IngestionService> ingestion_;
+    std::unique_ptr<ShardCoordinator> coordinator_;
     std::unique_ptr<dse::HttpServer> server_;
     std::thread server_thread_;
 };
