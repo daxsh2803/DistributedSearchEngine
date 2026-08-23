@@ -48,6 +48,14 @@ struct SearchRequest {
     std::size_t limit = 10;
 };
 
+// A single node/shard failure during distributed search.
+struct NodeFailureInfo {
+    std::size_t node_id = 0;
+    std::size_t shard_id = 0;
+    std::string category;        // e.g. "connection_failure", "timeout"
+    std::string message;         // human-readable description
+};
+
 // A structured search response, ready for serialization.
 struct SearchResponse {
     std::string query;           // echo of the original query
@@ -57,6 +65,8 @@ struct SearchResponse {
     std::vector<SearchResult> results;
     bool is_error = false;       // true if the request was invalid
     std::string error_message;   // description of the error (if is_error)
+    bool complete = true;        // false if any shard was unavailable
+    std::vector<NodeFailureInfo> errors;  // per-shard failures
 };
 
 // ---------------------------------------------------------------------------
@@ -100,9 +110,14 @@ private:
 //   "mode": "<and|or>",
 //   "total": <number>,
 //   "limit": <number>,
+//   "complete": <bool>,
 //   "results": [
 //     { "document_id": <number>, "score": <number> },
 //     ...
+//   ],
+//   "errors": [                      // only when complete == false
+//     { "node_id": <number>, "shard_id": <number>,
+//       "category": "<string>", "message": "<string>" }
 //   ]
 // }
 //

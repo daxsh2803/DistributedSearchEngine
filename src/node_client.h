@@ -101,6 +101,8 @@ struct ShardCountRequest {
 struct ShardCountResponse {
     std::size_t shard_id;
     std::size_t document_count = 0;
+    bool is_error = false;
+    std::string error_message;
 };
 
 // ---------------------------------------------------------------------------

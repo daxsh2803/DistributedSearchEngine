@@ -177,6 +177,8 @@ nlohmann::json to_json(const ShardCountResponse& resp)
     nlohmann::json j;
     j["shard_id"] = resp.shard_id;
     j["document_count"] = resp.document_count;
+    j["is_error"] = resp.is_error;
+    j["error_message"] = resp.error_message;
     return j;
 }
 
@@ -251,6 +253,8 @@ ShardCountResponse shard_count_response_from_json(const nlohmann::json& j)
     ShardCountResponse resp;
     resp.shard_id = j.at("shard_id").get<std::size_t>();
     resp.document_count = j.at("document_count").get<std::size_t>();
+    resp.is_error = j.value("is_error", false);
+    resp.error_message = j.value("error_message", "");
     return resp;
 }
 

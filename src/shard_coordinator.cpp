@@ -14,7 +14,6 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -47,7 +46,7 @@ NodeClient& ShardCoordinator::node_for_shard(std::size_t shard_id) const
     return *nodes_[node_id];
 }
 
-std::vector<Posting> ShardCoordinator::collect_postings(
+ShardCoordinator::PostingsResult ShardCoordinator::collect_postings(
     std::string_view term) const
 {
     const std::size_t n = router_->shard_count();
@@ -67,32 +66,51 @@ std::vector<Posting> ShardCoordinator::collect_postings(
             }));
     }
 
-    // Collect results.
-    std::vector<Posting> all;
+    // Collect results, recording failures.
+    PostingsResult result;
     for (auto& f : futures) {
         auto resp = f.get();
         if (resp.is_error || resp.terms_postings.empty()) {
+            if (resp.is_error) {
+                NodeFailureInfo fail;
+                fail.shard_id = resp.shard_id;
+                fail.node_id = placement_->node_of(resp.shard_id);
+                fail.category = "search_failure";
+                fail.message = resp.error_message;
+                result.failures.push_back(std::move(fail));
+            }
             continue;
         }
         const auto& postings = resp.terms_postings[0];
         for (const auto& p : postings) {
-            all.push_back({p.document_id, p.term_frequency});
+            result.postings.push_back({p.document_id, p.term_frequency});
         }
     }
 
-    return all;
+    return result;
 }
 
-std::size_t ShardCoordinator::compute_global_n() const
+ShardCoordinator::GlobalNResult ShardCoordinator::compute_global_n() const
 {
-    std::size_t total = 0;
+    GlobalNResult result;
     for (std::size_t sid = 0; sid < router_->shard_count(); ++sid) {
         NodeClient& nc = node_for_shard(sid);
         ShardCountRequest req;
         req.shard_id = sid;
-        total += nc.document_count(req).document_count;
+        auto resp = nc.document_count(req);
+        if (resp.is_error) {
+            result.complete = false;
+            NodeFailureInfo fail;
+            fail.shard_id = sid;
+            fail.node_id = placement_->node_of(sid);
+            fail.category = "count_failure";
+            fail.message = resp.error_message;
+            result.failures.push_back(std::move(fail));
+        } else {
+            result.total += resp.document_count;
+        }
     }
-    return total;
+    return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -121,8 +139,18 @@ SearchResponse ShardCoordinator::search(const SearchRequest& request) const
     std::sort(terms.begin(), terms.end());
     terms.erase(std::unique(terms.begin(), terms.end()), terms.end());
 
-    const double global_n = static_cast<double>(compute_global_n());
+    // Compute global document count, tracking failures.
+    const auto gn = compute_global_n();
+    const double global_n = static_cast<double>(gn.total);
+    response.complete = gn.complete;
+    for (auto& f : gn.failures) {
+        response.errors.push_back(std::move(f));
+    }
+
     if (global_n == 0.0) {
+        if (!response.complete) {
+            response.total = 0;
+        }
         return response;
     }
 
@@ -137,15 +165,21 @@ SearchResponse ShardCoordinator::search(const SearchRequest& request) const
         term_infos.reserve(terms.size());
 
         for (const auto& term : terms) {
-            auto postings_list = collect_postings(term);
+            auto pr = collect_postings(term);
 
-            if (postings_list.empty()) {
+            // Merge per-term failures into response.
+            for (auto& f : pr.failures) {
+                response.complete = false;
+                response.errors.push_back(std::move(f));
+            }
+
+            if (pr.postings.empty()) {
                 return response;  // Missing term poisons AND.
             }
 
-            const double df = static_cast<double>(postings_list.size());
+            const double df = static_cast<double>(pr.postings.size());
             const double idf = std::log(global_n / df);
-            term_infos.push_back({term, std::move(postings_list), idf});
+            term_infos.push_back({term, std::move(pr.postings), idf});
         }
 
         // Smallest-list-first intersection.
@@ -208,16 +242,22 @@ SearchResponse ShardCoordinator::search(const SearchRequest& request) const
         std::unordered_map<doc_id, double> scores;
 
         for (const auto& term : terms) {
-            const auto postings_list = collect_postings(term);
+            auto pr = collect_postings(term);
 
-            if (postings_list.empty()) {
+            // Merge per-term failures into response.
+            for (auto& f : pr.failures) {
+                response.complete = false;
+                response.errors.push_back(std::move(f));
+            }
+
+            if (pr.postings.empty()) {
                 continue;
             }
 
-            const double df = static_cast<double>(postings_list.size());
+            const double df = static_cast<double>(pr.postings.size());
             const double idf = std::log(global_n / df);
 
-            for (const auto& posting : postings_list) {
+            for (const auto& posting : pr.postings) {
                 scores[posting.document_id] +=
                     static_cast<double>(posting.term_frequency) * idf;
             }
@@ -388,7 +428,7 @@ std::optional<Document> ShardCoordinator::get_document(doc_id id) const
 
 std::size_t ShardCoordinator::total_document_count() const
 {
-    return compute_global_n();
+    return compute_global_n().total;
 }
 
 // ---------------------------------------------------------------------------

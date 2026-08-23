@@ -111,11 +111,20 @@ private:
     // Find the NodeClient that owns a given shard.
     NodeClient& node_for_shard(std::size_t shard_id) const;
 
-    // Collect postings for a term across all shards.
-    std::vector<Posting> collect_postings(std::string_view term) const;
+    // Collect postings for a term across all shards, recording failures.
+    struct PostingsResult {
+        std::vector<Posting> postings;
+        std::vector<NodeFailureInfo> failures;
+    };
+    PostingsResult collect_postings(std::string_view term) const;
 
-    // Compute global document count.
-    std::size_t compute_global_n() const;
+    // Compute global document count, recording failures.
+    struct GlobalNResult {
+        std::size_t total = 0;
+        bool complete = true;
+        std::vector<NodeFailureInfo> failures;
+    };
+    GlobalNResult compute_global_n() const;
 
     std::unique_ptr<ShardRouter> router_;
     std::unique_ptr<ShardPlacement> placement_;

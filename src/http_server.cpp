@@ -34,6 +34,7 @@ std::string to_json(const SearchResponse& resp)
     j["mode"]  = resp.mode;
     j["total"] = resp.total;
     j["limit"] = resp.limit;
+    j["complete"] = resp.complete;
 
     nlohmann::json results = nlohmann::json::array();
     for (const auto& r : resp.results) {
@@ -43,6 +44,19 @@ std::string to_json(const SearchResponse& resp)
         });
     }
     j["results"] = results;
+
+    if (!resp.complete && !resp.errors.empty()) {
+        nlohmann::json errors = nlohmann::json::array();
+        for (const auto& e : resp.errors) {
+            errors.push_back({
+                {"node_id",  e.node_id},
+                {"shard_id", e.shard_id},
+                {"category", e.category},
+                {"message",  e.message}
+            });
+        }
+        j["errors"] = errors;
+    }
 
     return j.dump();
 }

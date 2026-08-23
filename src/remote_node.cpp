@@ -234,6 +234,9 @@ ShardCountResponse RemoteNode::document_count(const ShardCountRequest& request)
 
         if (!res) {
             response.document_count = 0;
+            response.is_error = true;
+            response.error_message =
+                "Connection failed to node " + std::to_string(node_id_);
             return response;
         }
 
@@ -241,6 +244,8 @@ ShardCountResponse RemoteNode::document_count(const ShardCountRequest& request)
         return shard_count_response_from_json(j);
     } catch (...) {
         response.document_count = 0;
+        response.is_error = true;
+        response.error_message = "Unknown error communicating with node";
         return response;
     }
 }
