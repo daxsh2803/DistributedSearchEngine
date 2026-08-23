@@ -147,6 +147,9 @@ bool Shard::load()
     }
 
     // Rebuild the inverted index from DocumentStore.
+    // Clear the index first to avoid duplicate-document assertion failures
+    // when called on a shard that already has in-memory state.
+    index_ = InvertedIndex();
     for (const auto& [id, doc] : store_.all()) {
         index_.add_document(id, doc.content);
     }

@@ -71,7 +71,10 @@ add_library(dse_core STATIC
     src/shard.cpp
     src/shard_coordinator.cpp
     src/local_node.cpp
-    src/node_config.cpp)
+    src/node_config.cpp
+    src/node_wire.cpp
+    src/node_server.cpp
+    src/remote_node.cpp)
 target_include_directories(dse_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_options(dse_core PRIVATE ${PROJECT_WARNINGS})
 target_link_libraries(dse_core PUBLIC httplib::httplib nlohmann_json::nlohmann_json)
@@ -174,6 +177,22 @@ if(BUILD_TESTING)
     target_compile_options(node_config_test PRIVATE ${PROJECT_WARNINGS})
     target_link_libraries(node_config_test PRIVATE GTest::gtest_main dse_core)
 
+    add_executable(node_wire_test tests/node_wire_test.cpp)
+    target_compile_options(node_wire_test PRIVATE ${PROJECT_WARNINGS})
+    target_link_libraries(node_wire_test PRIVATE GTest::gtest_main dse_core)
+
+    add_executable(node_server_test tests/node_server_test.cpp)
+    target_compile_options(node_server_test PRIVATE ${PROJECT_WARNINGS})
+    target_link_libraries(node_server_test PRIVATE GTest::gtest_main dse_core)
+
+    add_executable(remote_node_test tests/remote_node_test.cpp)
+    target_compile_options(remote_node_test PRIVATE ${PROJECT_WARNINGS})
+    target_link_libraries(remote_node_test PRIVATE GTest::gtest_main dse_core)
+
+    add_executable(remote_coordinator_test tests/remote_coordinator_test.cpp)
+    target_compile_options(remote_coordinator_test PRIVATE ${PROJECT_WARNINGS})
+    target_link_libraries(remote_coordinator_test PRIVATE GTest::gtest_main dse_core)
+
     add_executable(distributed_coordinator_test tests/distributed_coordinator_test.cpp)
     target_compile_options(distributed_coordinator_test PRIVATE ${PROJECT_WARNINGS})
     target_link_libraries(distributed_coordinator_test PRIVATE GTest::gtest_main dse_core)
@@ -197,5 +216,9 @@ if(BUILD_TESTING)
     gtest_discover_tests(shard_coordinator_test)
     gtest_discover_tests(local_node_test)
     gtest_discover_tests(node_config_test)
+    gtest_discover_tests(node_wire_test)
+    gtest_discover_tests(node_server_test)
+    gtest_discover_tests(remote_node_test)
+    gtest_discover_tests(remote_coordinator_test)
     gtest_discover_tests(distributed_coordinator_test)
 endif()
