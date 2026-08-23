@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "node_client.h"
+#include "retry_policy.h"
 
 namespace httplib {
 class Client;
@@ -40,10 +41,12 @@ public:
     //   host     — hostname or IP (e.g., "127.0.0.1")
     //   port     — port the NodeServer is listening on
     //   timeout_seconds — connection/read/write timeout (default 30s)
+    //   retry_policy — policy for retrying transient failures (default: no retries)
     RemoteNode(std::size_t node_id,
                std::string host,
                int port,
-               int timeout_seconds = 30);
+               int timeout_seconds = 30,
+               RetryPolicy retry_policy = RetryPolicy::no_retries());
 
     ~RemoteNode() override;
 
@@ -71,10 +74,17 @@ private:
     // Create a fresh httplib::Client for each request (safe for concurrency).
     std::unique_ptr<httplib::Client> make_client() const;
 
+    // Check if an error response should be retried.
+    bool should_retry(const std::string& error_message) const;
+
+    // Sleep for the specified duration (milliseconds).
+    static void sleep_ms(std::size_t milliseconds);
+
     std::size_t node_id_;
     std::string host_;
     int port_;
     int timeout_seconds_;
+    RetryPolicy retry_policy_;
 };
 
 } // namespace dse
