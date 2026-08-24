@@ -23,6 +23,7 @@
 
 #include "http_server.h"
 #include "local_node.h"
+#include "metrics.h"
 #include "node_client.h"
 #include "node_config.h"
 #include "shard.h"
@@ -181,9 +182,13 @@ int main(int argc, char* argv[])
     std::vector<std::unique_ptr<dse::NodeClient>> nodes;
     nodes.push_back(std::move(node));
 
+    // --- Create metrics collector (shared by coordinator and HTTP server) ---
+    dse::MetricsCollector metrics;
+
     // --- Create coordinator ---
     auto coordinator = std::make_unique<dse::ShardCoordinator>(
         std::move(router), std::move(shard_placement), std::move(nodes));
+    coordinator->set_metrics(&metrics);
 
     // --- Startup recovery: load persisted documents or seed corpus ---
     bool loaded_persistence = false;
@@ -212,7 +217,7 @@ int main(int argc, char* argv[])
     }
 
     // --- Start the HTTP server ---
-    dse::HttpServer server(*coordinator);
+    dse::HttpServer server(*coordinator, &metrics);
     g_server.store(&server);
 
     std::signal(SIGINT, signal_handler);
@@ -233,6 +238,8 @@ int main(int argc, char* argv[])
     std::cout << "Try: curl \"http://127.0.0.1:" << actual_port
               << "/search?q=quick+fox\"\n";
     std::cout << "\nPress Ctrl+C to stop.\n";
+    std::cout << "Try: curl \"http://127.0.0.1:" << actual_port
+              << "/metrics\"\n";
 
     server_thread.join();
     g_server.store(nullptr);

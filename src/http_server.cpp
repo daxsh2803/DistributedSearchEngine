@@ -8,6 +8,7 @@
 // portable across all platforms including MinGW/MSYS2.
 
 #include "http_server.h"
+#include "metrics.h"
 #include "shard_coordinator.h"
 
 #include <httplib.h>
@@ -75,8 +76,10 @@ void error_response(httplib::Response& res, int status, const std::string& msg)
 // Lifecycle
 // ---------------------------------------------------------------------------
 
-HttpServer::HttpServer(ShardCoordinator& coordinator)
+HttpServer::HttpServer(ShardCoordinator& coordinator,
+                       MetricsCollector* metrics)
     : coordinator_(coordinator)
+    , metrics_(metrics)
     , server_(std::make_unique<httplib::Server>())
 {
     register_routes();
@@ -123,6 +126,92 @@ int HttpServer::port() const
 
 void HttpServer::register_routes()
 {
+    // --- GET /health ---
+    server_->Get("/health", [](const httplib::Request& /*req*/,
+                                httplib::Response& res) {
+        res.status = 200;
+        nlohmann::json j;
+        j["status"] = "ok";
+        res.set_content(j.dump(), "application/json");
+    });
+
+    // --- GET /metrics ---
+    server_->Get("/metrics", [this](const httplib::Request& /*req*/,
+                                     httplib::Response& res) {
+        if (!metrics_) {
+            res.status = 503;
+            nlohmann::json err;
+            err["error"] = "Metrics unavailable";
+            res.set_content(err.dump(), "application/json");
+            return;
+        }
+
+        const auto snap = metrics_->snapshot();
+        nlohmann::json j;
+
+        // Node-level search metrics
+        j["searches_total"] = snap.searches_total;
+        j["search_errors"] = snap.search_errors;
+        j["search_incomplete"] = snap.search_incomplete;
+        j["search_latency"] = {
+            {"average_ms", snap.search_latency.average_ms},
+            {"p99_ms", snap.search_latency.p99_ms},
+            {"sample_count", snap.search_latency.sample_count}
+        };
+
+        // Node-level write metrics
+        j["writes_total"] = snap.writes_total;
+        j["write_errors"] = snap.write_errors;
+
+        // Retry metrics
+        j["retries_total"] = snap.retries_total;
+
+        // Circuit breaker metrics
+        j["circuit_open_events"] = snap.circuit_open_events;
+        j["circuit_close_events"] = snap.circuit_close_events;
+
+        // Coordinator-level search metrics
+        j["coordinator_searches_total"] = snap.coordinator_searches_total;
+        j["coordinator_search_success"] = snap.coordinator_search_success;
+        j["coordinator_search_incomplete"] = snap.coordinator_search_incomplete;
+        j["coordinator_search_errors"] = snap.coordinator_search_errors;
+        j["coordinator_search_latency"] = {
+            {"average_ms", snap.coordinator_search_latency.average_ms},
+            {"p99_ms", snap.coordinator_search_latency.p99_ms},
+            {"sample_count", snap.coordinator_search_latency.sample_count}
+        };
+
+        // Coordinator-level write metrics
+        j["coordinator_writes_total"] = snap.coordinator_writes_total;
+        j["coordinator_write_success"] = snap.coordinator_write_success;
+        j["coordinator_write_errors"] = snap.coordinator_write_errors;
+        j["coordinator_write_latency"] = {
+            {"average_ms", snap.coordinator_write_latency.average_ms},
+            {"p99_ms", snap.coordinator_write_latency.p99_ms},
+            {"sample_count", snap.coordinator_write_latency.sample_count}
+        };
+
+        // Per-node metrics
+        nlohmann::json per_node = nlohmann::json::object();
+        for (const auto& [node_id, nm] : snap.per_node) {
+            per_node[std::to_string(node_id)] = {
+                {"searches", nm.searches},
+                {"search_errors", nm.search_errors},
+                {"search_incomplete", nm.search_incomplete},
+                {"writes", nm.writes},
+                {"write_errors", nm.write_errors},
+                {"retries", nm.retries},
+                {"circuit_state", static_cast<int>(nm.circuit_state)},
+                {"circuit_open_events", nm.circuit_open_events},
+                {"circuit_close_events", nm.circuit_close_events}
+            };
+        }
+        j["per_node"] = per_node;
+
+        res.status = 200;
+        res.set_content(j.dump(), "application/json");
+    });
+
     // --- GET /search ---
     server_->Get("/search", [this](const httplib::Request& req,
                                     httplib::Response& res) {
