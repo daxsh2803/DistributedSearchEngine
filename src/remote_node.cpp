@@ -58,9 +58,22 @@ RemoteNode::RemoteNode(std::size_t node_id,
 
 RemoteNode::~RemoteNode() = default;
 
+void RemoteNode::set_metrics(MetricsCollector* metrics)
+{
+    metrics_ = metrics;
+}
+
 std::size_t RemoteNode::node_id() const
 {
     return node_id_;
+}
+
+double RemoteNode::elapsed_ms(std::chrono::steady_clock::time_point start)
+{
+    const auto end = std::chrono::steady_clock::now();
+    const auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
+        end - start);
+    return static_cast<double>(duration.count()) / 1000.0;
 }
 
 std::unique_ptr<httplib::Client> RemoteNode::make_client() const
@@ -92,12 +105,22 @@ void RemoteNode::sleep_ms(std::size_t milliseconds)
     std::this_thread::sleep_for(std::chrono::milliseconds(milliseconds));
 }
 
+void RemoteNode::observe_circuit_breaker()
+{
+    if (!metrics_) {
+        return;
+    }
+    const auto current_state = circuit_breaker_->state();
+    metrics_->record_circuit_breaker(node_id_, current_state);
+}
+
 // ---------------------------------------------------------------------------
 // Search
 // ---------------------------------------------------------------------------
 
 ShardSearchResponse RemoteNode::search(const ShardSearchRequest& request)
 {
+    const auto start_time = std::chrono::steady_clock::now();
     ShardSearchResponse response;
     response.shard_id = request.shard_id;
 
@@ -106,12 +129,23 @@ ShardSearchResponse RemoteNode::search(const ShardSearchRequest& request)
         response.is_error = true;
         response.error_message = "Circuit breaker OPEN: node " +
             std::to_string(node_id_) + " is unavailable";
+        // Record circuit-open fast failure.
+        if (metrics_) {
+            metrics_->record_search(node_id_, request.shard_id,
+                                    elapsed_ms(start_time), false, false);
+        }
+        observe_circuit_breaker();
         return response;
     }
 
     bool last_attempt_succeeded = false;
 
     for (std::size_t attempt = 0; attempt < retry_policy_.max_attempts; ++attempt) {
+        // Record retry (not the initial request).
+        if (attempt > 0 && metrics_) {
+            metrics_->record_retry(node_id_, "search");
+        }
+
         // Sleep before retry (not on first attempt).
         if (attempt > 0) {
             auto delay = retry_policy_.delay_for_attempt(attempt);
@@ -136,6 +170,11 @@ ShardSearchResponse RemoteNode::search(const ShardSearchRequest& request)
                 }
                 // Record transport failure in circuit breaker.
                 circuit_breaker_->record_failure();
+                if (metrics_) {
+                    metrics_->record_search(node_id_, request.shard_id,
+                                            elapsed_ms(start_time), false, false);
+                }
+                observe_circuit_breaker();
                 return response;
             }
 
@@ -151,11 +190,21 @@ ShardSearchResponse RemoteNode::search(const ShardSearchRequest& request)
                 }
                 // HTTP errors are application-level — do not retry.
                 // Do NOT record in circuit breaker (not a transport failure).
+                if (metrics_) {
+                    metrics_->record_search(node_id_, request.shard_id,
+                                            elapsed_ms(start_time), false, false);
+                }
+                observe_circuit_breaker();
                 return response;
             }
 
             auto j = nlohmann::json::parse(res->body);
             last_attempt_succeeded = true;
+            if (metrics_) {
+                metrics_->record_search(node_id_, request.shard_id,
+                                        elapsed_ms(start_time), true, true);
+            }
+            observe_circuit_breaker();
             return shard_search_response_from_json(j);
         } catch (const std::exception& e) {
             response.is_error = true;
@@ -168,11 +217,21 @@ ShardSearchResponse RemoteNode::search(const ShardSearchRequest& request)
             if (is_transport_failure(response.error_message)) {
                 circuit_breaker_->record_failure();
             }
+            if (metrics_) {
+                metrics_->record_search(node_id_, request.shard_id,
+                                        elapsed_ms(start_time), false, false);
+            }
+            observe_circuit_breaker();
             return response;
         } catch (...) {
             response.is_error = true;
             response.error_message = "Unknown error communicating with node";
             circuit_breaker_->record_failure();
+            if (metrics_) {
+                metrics_->record_search(node_id_, request.shard_id,
+                                        elapsed_ms(start_time), false, false);
+            }
+            observe_circuit_breaker();
             return response;
         }
     }
@@ -181,6 +240,11 @@ ShardSearchResponse RemoteNode::search(const ShardSearchRequest& request)
     if (!last_attempt_succeeded) {
         circuit_breaker_->record_failure();
     }
+    if (metrics_) {
+        metrics_->record_search(node_id_, request.shard_id,
+                                elapsed_ms(start_time), false, false);
+    }
+    observe_circuit_breaker();
     return response;
 }
 
@@ -190,6 +254,7 @@ ShardSearchResponse RemoteNode::search(const ShardSearchRequest& request)
 
 ShardWriteResponse RemoteNode::add_document(const ShardWriteRequest& request)
 {
+    const auto start_time = std::chrono::steady_clock::now();
     ShardWriteResponse response;
     response.shard_id = request.shard_id;
     response.document_id = request.document_id;
@@ -199,6 +264,10 @@ ShardWriteResponse RemoteNode::add_document(const ShardWriteRequest& request)
         response.is_error = true;
         response.error_message = "Circuit breaker OPEN: node " +
             std::to_string(node_id_) + " is unavailable";
+        if (metrics_) {
+            metrics_->record_write("add", node_id_,
+                                   elapsed_ms(start_time), false);
+        }
         return response;
     }
 
@@ -212,27 +281,48 @@ ShardWriteResponse RemoteNode::add_document(const ShardWriteRequest& request)
             response.error_message =
                 "Connection failed to node " + std::to_string(node_id_);
             circuit_breaker_->record_failure();
+            if (metrics_) {
+                metrics_->record_write("add", node_id_,
+                                       elapsed_ms(start_time), false);
+            }
+            observe_circuit_breaker();
             return response;
         }
 
         auto j = nlohmann::json::parse(res->body);
         circuit_breaker_->record_success();
+        if (metrics_) {
+            metrics_->record_write("add", node_id_,
+                                   elapsed_ms(start_time), true);
+        }
+        observe_circuit_breaker();
         return shard_write_response_from_json(j);
     } catch (const std::exception& e) {
         response.is_error = true;
         response.error_message = std::string("Request failed: ") + e.what();
         circuit_breaker_->record_failure();
+        if (metrics_) {
+            metrics_->record_write("add", node_id_,
+                                   elapsed_ms(start_time), false);
+        }
+        observe_circuit_breaker();
         return response;
     } catch (...) {
         response.is_error = true;
         response.error_message = "Unknown error communicating with node";
         circuit_breaker_->record_failure();
+        if (metrics_) {
+            metrics_->record_write("add", node_id_,
+                                   elapsed_ms(start_time), false);
+        }
+        observe_circuit_breaker();
         return response;
     }
 }
 
 ShardWriteResponse RemoteNode::update_document(const ShardWriteRequest& request)
 {
+    const auto start_time = std::chrono::steady_clock::now();
     ShardWriteResponse response;
     response.shard_id = request.shard_id;
     response.document_id = request.document_id;
@@ -242,6 +332,10 @@ ShardWriteResponse RemoteNode::update_document(const ShardWriteRequest& request)
         response.is_error = true;
         response.error_message = "Circuit breaker OPEN: node " +
             std::to_string(node_id_) + " is unavailable";
+        if (metrics_) {
+            metrics_->record_write("update", node_id_,
+                                   elapsed_ms(start_time), false);
+        }
         return response;
     }
 
@@ -255,27 +349,48 @@ ShardWriteResponse RemoteNode::update_document(const ShardWriteRequest& request)
             response.error_message =
                 "Connection failed to node " + std::to_string(node_id_);
             circuit_breaker_->record_failure();
+            if (metrics_) {
+                metrics_->record_write("update", node_id_,
+                                       elapsed_ms(start_time), false);
+            }
+            observe_circuit_breaker();
             return response;
         }
 
         auto j = nlohmann::json::parse(res->body);
         circuit_breaker_->record_success();
+        if (metrics_) {
+            metrics_->record_write("update", node_id_,
+                                   elapsed_ms(start_time), true);
+        }
+        observe_circuit_breaker();
         return shard_write_response_from_json(j);
     } catch (const std::exception& e) {
         response.is_error = true;
         response.error_message = std::string("Request failed: ") + e.what();
         circuit_breaker_->record_failure();
+        if (metrics_) {
+            metrics_->record_write("update", node_id_,
+                                   elapsed_ms(start_time), false);
+        }
+        observe_circuit_breaker();
         return response;
     } catch (...) {
         response.is_error = true;
         response.error_message = "Unknown error communicating with node";
         circuit_breaker_->record_failure();
+        if (metrics_) {
+            metrics_->record_write("update", node_id_,
+                                   elapsed_ms(start_time), false);
+        }
+        observe_circuit_breaker();
         return response;
     }
 }
 
 ShardRemoveResponse RemoteNode::remove_document(const ShardRemoveRequest& request)
 {
+    const auto start_time = std::chrono::steady_clock::now();
     ShardRemoveResponse response;
     response.shard_id = request.shard_id;
 
@@ -284,6 +399,10 @@ ShardRemoveResponse RemoteNode::remove_document(const ShardRemoveRequest& reques
         response.is_error = true;
         response.error_message = "Circuit breaker OPEN: node " +
             std::to_string(node_id_) + " is unavailable";
+        if (metrics_) {
+            metrics_->record_write("delete", node_id_,
+                                   elapsed_ms(start_time), false);
+        }
         return response;
     }
 
@@ -297,21 +416,41 @@ ShardRemoveResponse RemoteNode::remove_document(const ShardRemoveRequest& reques
             response.error_message =
                 "Connection failed to node " + std::to_string(node_id_);
             circuit_breaker_->record_failure();
+            if (metrics_) {
+                metrics_->record_write("delete", node_id_,
+                                       elapsed_ms(start_time), false);
+            }
+            observe_circuit_breaker();
             return response;
         }
 
         auto j = nlohmann::json::parse(res->body);
         circuit_breaker_->record_success();
+        if (metrics_) {
+            metrics_->record_write("delete", node_id_,
+                                   elapsed_ms(start_time), true);
+        }
+        observe_circuit_breaker();
         return shard_remove_response_from_json(j);
     } catch (const std::exception& e) {
         response.is_error = true;
         response.error_message = std::string("Request failed: ") + e.what();
         circuit_breaker_->record_failure();
+        if (metrics_) {
+            metrics_->record_write("delete", node_id_,
+                                   elapsed_ms(start_time), false);
+        }
+        observe_circuit_breaker();
         return response;
     } catch (...) {
         response.is_error = true;
         response.error_message = "Unknown error communicating with node";
         circuit_breaker_->record_failure();
+        if (metrics_) {
+            metrics_->record_write("delete", node_id_,
+                                   elapsed_ms(start_time), false);
+        }
+        observe_circuit_breaker();
         return response;
     }
 }
@@ -322,6 +461,7 @@ ShardRemoveResponse RemoteNode::remove_document(const ShardRemoveRequest& reques
 
 ShardGetResponse RemoteNode::get_document(const ShardGetRequest& request)
 {
+    const auto start_time = std::chrono::steady_clock::now();
     ShardGetResponse response;
     response.shard_id = request.shard_id;
     response.document_id = request.document_id;
@@ -329,10 +469,21 @@ ShardGetResponse RemoteNode::get_document(const ShardGetRequest& request)
     // Check circuit breaker before attempting request.
     if (!circuit_breaker_->should_allow_request()) {
         response.found = false;
+        // get_document doesn't have is_error; treat circuit-open as not found.
+        // Metrics: record as a write with success=false (no dedicated get metric).
+        if (metrics_) {
+            metrics_->record_write("get", node_id_,
+                                   elapsed_ms(start_time), false);
+        }
         return response;
     }
 
     for (std::size_t attempt = 0; attempt < retry_policy_.max_attempts; ++attempt) {
+        // Record retry (not the initial request).
+        if (attempt > 0 && metrics_) {
+            metrics_->record_retry(node_id_, "get");
+        }
+
         if (attempt > 0) {
             auto delay = retry_policy_.delay_for_attempt(attempt);
             if (delay > 0) {
@@ -352,11 +503,21 @@ ShardGetResponse RemoteNode::get_document(const ShardGetRequest& request)
                     continue;
                 }
                 circuit_breaker_->record_failure();
+                if (metrics_) {
+                    metrics_->record_write("get", node_id_,
+                                           elapsed_ms(start_time), false);
+                }
+                observe_circuit_breaker();
                 return response;
             }
 
             auto j = nlohmann::json::parse(res->body);
             circuit_breaker_->record_success();
+            if (metrics_) {
+                metrics_->record_write("get", node_id_,
+                                       elapsed_ms(start_time), true);
+            }
+            observe_circuit_breaker();
             return shard_get_response_from_json(j);
         } catch (...) {
             response.found = false;
@@ -364,16 +525,27 @@ ShardGetResponse RemoteNode::get_document(const ShardGetRequest& request)
                 continue;
             }
             circuit_breaker_->record_failure();
+            if (metrics_) {
+                metrics_->record_write("get", node_id_,
+                                       elapsed_ms(start_time), false);
+            }
+            observe_circuit_breaker();
             return response;
         }
     }
 
     circuit_breaker_->record_failure();
+    if (metrics_) {
+        metrics_->record_write("get", node_id_,
+                               elapsed_ms(start_time), false);
+    }
+    observe_circuit_breaker();
     return response;
 }
 
 ShardCountResponse RemoteNode::document_count(const ShardCountRequest& request)
 {
+    const auto start_time = std::chrono::steady_clock::now();
     ShardCountResponse response;
     response.shard_id = request.shard_id;
 
@@ -383,10 +555,19 @@ ShardCountResponse RemoteNode::document_count(const ShardCountRequest& request)
         response.is_error = true;
         response.error_message = "Circuit breaker OPEN: node " +
             std::to_string(node_id_) + " is unavailable";
+        if (metrics_) {
+            metrics_->record_search(node_id_, request.shard_id,
+                                    elapsed_ms(start_time), false, false);
+        }
         return response;
     }
 
     for (std::size_t attempt = 0; attempt < retry_policy_.max_attempts; ++attempt) {
+        // Record retry (not the initial request).
+        if (attempt > 0 && metrics_) {
+            metrics_->record_retry(node_id_, "count");
+        }
+
         if (attempt > 0) {
             auto delay = retry_policy_.delay_for_attempt(attempt);
             if (delay > 0) {
@@ -409,11 +590,21 @@ ShardCountResponse RemoteNode::document_count(const ShardCountRequest& request)
                     continue;
                 }
                 circuit_breaker_->record_failure();
+                if (metrics_) {
+                    metrics_->record_search(node_id_, request.shard_id,
+                                            elapsed_ms(start_time), false, false);
+                }
+                observe_circuit_breaker();
                 return response;
             }
 
             auto j = nlohmann::json::parse(res->body);
             circuit_breaker_->record_success();
+            if (metrics_) {
+                metrics_->record_search(node_id_, request.shard_id,
+                                        elapsed_ms(start_time), true, true);
+            }
+            observe_circuit_breaker();
             return shard_count_response_from_json(j);
         } catch (...) {
             response.document_count = 0;
@@ -423,11 +614,21 @@ ShardCountResponse RemoteNode::document_count(const ShardCountRequest& request)
                 continue;
             }
             circuit_breaker_->record_failure();
+            if (metrics_) {
+                metrics_->record_search(node_id_, request.shard_id,
+                                        elapsed_ms(start_time), false, false);
+            }
+            observe_circuit_breaker();
             return response;
         }
     }
 
     circuit_breaker_->record_failure();
+    if (metrics_) {
+        metrics_->record_search(node_id_, request.shard_id,
+                                elapsed_ms(start_time), false, false);
+    }
+    observe_circuit_breaker();
     return response;
 }
 
@@ -449,14 +650,17 @@ bool RemoteNode::save_shard(std::size_t shard_id)
 
         if (!res) {
             circuit_breaker_->record_failure();
+            observe_circuit_breaker();
             return false;
         }
 
         auto j = nlohmann::json::parse(res->body);
         circuit_breaker_->record_success();
+        observe_circuit_breaker();
         return shard_persistence_response_from_json(j);
     } catch (...) {
         circuit_breaker_->record_failure();
+        observe_circuit_breaker();
         return false;
     }
 }
@@ -475,14 +679,17 @@ bool RemoteNode::load_shard(std::size_t shard_id)
 
         if (!res) {
             circuit_breaker_->record_failure();
+            observe_circuit_breaker();
             return false;
         }
 
         auto j = nlohmann::json::parse(res->body);
         circuit_breaker_->record_success();
+        observe_circuit_breaker();
         return shard_persistence_response_from_json(j);
     } catch (...) {
         circuit_breaker_->record_failure();
+        observe_circuit_breaker();
         return false;
     }
 }

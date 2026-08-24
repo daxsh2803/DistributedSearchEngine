@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "circuit_breaker.h"
+#include "metrics.h"
 #include "node_client.h"
 #include "retry_policy.h"
 
@@ -58,6 +59,10 @@ public:
                int timeout_seconds,
                RetryPolicy retry_policy,
                CircuitBreaker circuit_breaker);
+
+    // Set an optional metrics collector for observability.
+    // Pass nullptr to disable metrics (default).
+    void set_metrics(MetricsCollector* metrics);
 
     ~RemoteNode() override;
 
@@ -94,12 +99,19 @@ private:
     // Sleep for the specified duration (milliseconds).
     static void sleep_ms(std::size_t milliseconds);
 
+    // Helper to compute elapsed milliseconds since a time point.
+    static double elapsed_ms(std::chrono::steady_clock::time_point start);
+
+    // Observe circuit breaker state and record transitions in metrics.
+    void observe_circuit_breaker();
+
     std::size_t node_id_;
     std::string host_;
     int port_;
     int timeout_seconds_;
     RetryPolicy retry_policy_;
     std::unique_ptr<CircuitBreaker> circuit_breaker_;
+    MetricsCollector* metrics_ = nullptr;  // optional, not owned
 };
 
 } // namespace dse

@@ -76,7 +76,8 @@ add_library(dse_core STATIC
     src/node_server.cpp
     src/remote_node.cpp
     src/retry_policy.cpp
-    src/circuit_breaker.cpp)
+    src/circuit_breaker.cpp
+    src/metrics.cpp)
 target_include_directories(dse_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_options(dse_core PRIVATE ${PROJECT_WARNINGS})
 target_link_libraries(dse_core PUBLIC httplib::httplib nlohmann_json::nlohmann_json)
@@ -248,4 +249,15 @@ if(BUILD_TESTING)
     gtest_discover_tests(remote_retry_test)
     gtest_discover_tests(circuit_breaker_test)
     gtest_discover_tests(remote_circuit_breaker_test)
+
+    add_executable(metrics_test tests/metrics_test.cpp)
+    target_compile_options(metrics_test PRIVATE ${PROJECT_WARNINGS})
+    target_link_libraries(metrics_test PRIVATE GTest::gtest_main dse_core)
+
+    add_executable(remote_node_metrics_test tests/remote_node_metrics_test.cpp)
+    target_compile_options(remote_node_metrics_test PRIVATE ${PROJECT_WARNINGS})
+    target_link_libraries(remote_node_metrics_test PRIVATE GTest::gtest_main dse_core)
+
+    gtest_discover_tests(metrics_test)
+    gtest_discover_tests(remote_node_metrics_test)
 endif()
