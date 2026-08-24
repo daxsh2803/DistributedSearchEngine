@@ -25,6 +25,7 @@
 #include <string>
 #include <vector>
 
+#include "circuit_breaker.h"
 #include "node_client.h"
 #include "retry_policy.h"
 
@@ -42,11 +43,21 @@ public:
     //   port     — port the NodeServer is listening on
     //   timeout_seconds — connection/read/write timeout (default 30s)
     //   retry_policy — policy for retrying transient failures (default: no retries)
+    //   circuit_breaker — circuit breaker for failure isolation (default: no breaking)
+    // Constructor with default circuit breaker (no breaking).
     RemoteNode(std::size_t node_id,
                std::string host,
                int port,
                int timeout_seconds = 30,
                RetryPolicy retry_policy = RetryPolicy::no_retries());
+
+    // Constructor with explicit circuit breaker.
+    RemoteNode(std::size_t node_id,
+               std::string host,
+               int port,
+               int timeout_seconds,
+               RetryPolicy retry_policy,
+               CircuitBreaker circuit_breaker);
 
     ~RemoteNode() override;
 
@@ -77,6 +88,9 @@ private:
     // Check if an error response should be retried.
     bool should_retry(const std::string& error_message) const;
 
+    // Check if an error is a transport-level failure (for circuit breaker).
+    bool is_transport_failure(const std::string& error_message) const;
+
     // Sleep for the specified duration (milliseconds).
     static void sleep_ms(std::size_t milliseconds);
 
@@ -85,6 +99,7 @@ private:
     int port_;
     int timeout_seconds_;
     RetryPolicy retry_policy_;
+    std::unique_ptr<CircuitBreaker> circuit_breaker_;
 };
 
 } // namespace dse

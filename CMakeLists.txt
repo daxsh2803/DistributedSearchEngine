@@ -75,7 +75,8 @@ add_library(dse_core STATIC
     src/node_wire.cpp
     src/node_server.cpp
     src/remote_node.cpp
-    src/retry_policy.cpp)
+    src/retry_policy.cpp
+    src/circuit_breaker.cpp)
 target_include_directories(dse_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_options(dse_core PRIVATE ${PROJECT_WARNINGS})
 target_link_libraries(dse_core PUBLIC httplib::httplib nlohmann_json::nlohmann_json)
@@ -210,6 +211,14 @@ if(BUILD_TESTING)
     target_compile_options(remote_retry_test PRIVATE ${PROJECT_WARNINGS})
     target_link_libraries(remote_retry_test PRIVATE GTest::gtest_main dse_core)
 
+    add_executable(circuit_breaker_test tests/circuit_breaker_test.cpp)
+    target_compile_options(circuit_breaker_test PRIVATE ${PROJECT_WARNINGS})
+    target_link_libraries(circuit_breaker_test PRIVATE GTest::gtest_main dse_core)
+
+    add_executable(remote_circuit_breaker_test tests/remote_circuit_breaker_test.cpp)
+    target_compile_options(remote_circuit_breaker_test PRIVATE ${PROJECT_WARNINGS})
+    target_link_libraries(remote_circuit_breaker_test PRIVATE GTest::gtest_main dse_core)
+
     include(GoogleTest)
     gtest_discover_tests(smoke_test)
     gtest_discover_tests(tokenizer_test)
@@ -237,4 +246,6 @@ if(BUILD_TESTING)
     gtest_discover_tests(failure_semantics_test)
     gtest_discover_tests(retry_policy_test)
     gtest_discover_tests(remote_retry_test)
+    gtest_discover_tests(circuit_breaker_test)
+    gtest_discover_tests(remote_circuit_breaker_test)
 endif()
