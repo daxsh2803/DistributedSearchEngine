@@ -381,15 +381,18 @@ TEST(IndexSortedInvariant, SortedAfterManyMixedInsertions)
                                      {42, 2}, {55, 2}, {60, 2}, {88, 2}, {99, 2}});
 }
 
+// ADR-002: re-adding a document ID is a contract violation, asserted in
+// debug builds (assert is active when NDEBUG is not defined).
+// In Release builds, assert() is compiled out so this test is not applicable.
+#ifndef NDEBUG
 TEST(IndexSortedInvariant, ReAddingDocumentIdIsContractViolation)
 {
     InvertedIndex index;
     index.add_document(1, "hello");
 
-    // ADR-002: re-adding a document ID is a contract violation, asserted in
-    // debug builds (assert is active when NDEBUG is not defined).
     EXPECT_DEATH((index.add_document(1, "again")), ".*");
 }
+#endif  // NDEBUG
 
 // ---------------------------------------------------------------------------
 // 8. Multiple terms & shared terms

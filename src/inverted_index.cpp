@@ -38,7 +38,11 @@ void InvertedIndex::add_document(doc_id id, std::string_view text)
     // Precondition (ADR-002): each document ID may be added at most once.
     // Re-adding is a contract violation - undefined behavior in release
     // builds, caught here in debug builds.
-    assert(documents_.insert(id).second);
+    // NOTE: We must call insert() unconditionally (not inside assert())
+    // because assert() is compiled out in Release builds, which would
+    // skip the side effect of adding to documents_.
+    auto [iter, inserted] = documents_.insert(id);
+    assert(inserted && "Document ID already exists in index");
 
     // Tokenize once and aggregate duplicate tokens into per-term counts.
     // This is where the duplicate-preserving output of Phase 1's tokenizer
