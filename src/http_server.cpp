@@ -11,6 +11,14 @@
 #include "metrics.h"
 #include "shard_coordinator.h"
 
+// Increase listen backlog from httplib's default of 5 to accommodate
+// concurrent client connections. The default is too small for any
+// real concurrent workload and causes ECONNREFUSED on Linux when
+// multiple clients connect simultaneously.
+#ifndef CPPHTTPLIB_LISTEN_BACKLOG
+#define CPPHTTPLIB_LISTEN_BACKLOG 128
+#endif
+
 #include <httplib.h>
 #include <nlohmann/json.hpp>
 
