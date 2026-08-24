@@ -7,6 +7,7 @@
 #include "shard_coordinator.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <functional>
@@ -18,6 +19,7 @@
 #include <vector>
 
 #include "inverted_index.h"
+#include "metrics.h"
 #include "node_client.h"
 #include "node_config.h"
 #include "search_service.h"
@@ -34,6 +36,11 @@ ShardCoordinator::ShardCoordinator(
     , placement_(std::move(placement))
     , nodes_(std::move(nodes))
 {
+}
+
+void ShardCoordinator::set_metrics(MetricsCollector* metrics)
+{
+    metrics_ = metrics;
 }
 
 // ---------------------------------------------------------------------------
@@ -119,6 +126,7 @@ ShardCoordinator::GlobalNResult ShardCoordinator::compute_global_n() const
 
 SearchResponse ShardCoordinator::search(const SearchRequest& request) const
 {
+    const auto start_time = std::chrono::steady_clock::now();
     SearchResponse response;
     response.query = request.query;
     response.mode = (request.mode == SearchMode::And) ? "and" : "or";
@@ -127,11 +135,23 @@ SearchResponse ShardCoordinator::search(const SearchRequest& request) const
     if (!SearchService::validate_request(request)) {
         response.is_error = true;
         response.error_message = "Invalid request: empty query or limit < 1";
+        if (metrics_) {
+            const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - start_time).count();
+            metrics_->record_coordinator_search(
+                static_cast<double>(elapsed) / 1000.0, false, true);
+        }
         return response;
     }
 
     const auto tokens = tokenize(request.query);
     if (tokens.empty()) {
+        if (metrics_) {
+            const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - start_time).count();
+            metrics_->record_coordinator_search(
+                static_cast<double>(elapsed) / 1000.0, true, true);
+        }
         return response;
     }
 
@@ -150,6 +170,12 @@ SearchResponse ShardCoordinator::search(const SearchRequest& request) const
     if (global_n == 0.0) {
         if (!response.complete) {
             response.total = 0;
+        }
+        if (metrics_) {
+            const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - start_time).count();
+            metrics_->record_coordinator_search(
+                static_cast<double>(elapsed) / 1000.0, true, response.complete);
         }
         return response;
     }
@@ -174,6 +200,12 @@ SearchResponse ShardCoordinator::search(const SearchRequest& request) const
             }
 
             if (pr.postings.empty()) {
+                if (metrics_) {
+                    const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now() - start_time).count();
+                    metrics_->record_coordinator_search(
+                        static_cast<double>(elapsed) / 1000.0, true, response.complete);
+                }
                 return response;  // Missing term poisons AND.
             }
 
@@ -202,6 +234,12 @@ SearchResponse ShardCoordinator::search(const SearchRequest& request) const
             }
             scores = std::move(next_scores);
             if (scores.empty()) {
+                if (metrics_) {
+                    const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now() - start_time).count();
+                    metrics_->record_coordinator_search(
+                        static_cast<double>(elapsed) / 1000.0, true, response.complete);
+                }
                 return response;
             }
         }
@@ -236,6 +274,14 @@ SearchResponse ShardCoordinator::search(const SearchRequest& request) const
         for (std::size_t i = 0; i < count; ++i) {
             response.results.push_back(results[i]);
         }
+
+        if (metrics_) {
+            const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - start_time).count();
+            metrics_->record_coordinator_search(
+                static_cast<double>(elapsed) / 1000.0, true, response.complete);
+        }
+        return response;
 
     } else {
         // OR mode: union across all shards.
@@ -285,6 +331,12 @@ SearchResponse ShardCoordinator::search(const SearchRequest& request) const
         }
     }
 
+    if (metrics_) {
+        const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - start_time).count();
+        metrics_->record_coordinator_search(
+            static_cast<double>(elapsed) / 1000.0, true, response.complete);
+    }
     return response;
 }
 
@@ -295,12 +347,19 @@ SearchResponse ShardCoordinator::search(const SearchRequest& request) const
 CoordinatorIngestResponse ShardCoordinator::ingest(
     const CoordinatorIngestRequest& request)
 {
+    const auto start_time = std::chrono::steady_clock::now();
     CoordinatorIngestResponse response;
     response.document_id = request.id;
 
     if (request.content.empty()) {
         response.is_error = true;
         response.error_message = "Invalid request: content must be non-empty";
+        if (metrics_) {
+            const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - start_time).count();
+            metrics_->record_coordinator_write(
+                static_cast<double>(elapsed) / 1000.0, false);
+        }
         return response;
     }
 
@@ -314,6 +373,12 @@ CoordinatorIngestResponse ShardCoordinator::ingest(
     if (all_blank) {
         response.is_error = true;
         response.error_message = "Invalid request: content must be non-whitespace";
+        if (metrics_) {
+            const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - start_time).count();
+            metrics_->record_coordinator_write(
+                static_cast<double>(elapsed) / 1000.0, false);
+        }
         return response;
     }
 
@@ -330,22 +395,41 @@ CoordinatorIngestResponse ShardCoordinator::ingest(
     if (resp.is_error) {
         response.is_error = true;
         response.error_message = std::move(resp.error_message);
+        if (metrics_) {
+            const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - start_time).count();
+            metrics_->record_coordinator_write(
+                static_cast<double>(elapsed) / 1000.0, false);
+        }
         return response;
     }
 
     response.terms_indexed = resp.terms_indexed;
+    if (metrics_) {
+        const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - start_time).count();
+        metrics_->record_coordinator_write(
+            static_cast<double>(elapsed) / 1000.0, true);
+    }
     return response;
 }
 
 CoordinatorUpdateResponse ShardCoordinator::update(
     const CoordinatorUpdateRequest& request)
 {
+    const auto start_time = std::chrono::steady_clock::now();
     CoordinatorUpdateResponse response;
     response.document_id = request.id;
 
     if (request.content.empty()) {
         response.is_error = true;
         response.error_message = "Invalid request: content must be non-empty";
+        if (metrics_) {
+            const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - start_time).count();
+            metrics_->record_coordinator_write(
+                static_cast<double>(elapsed) / 1000.0, false);
+        }
         return response;
     }
 
@@ -359,6 +443,12 @@ CoordinatorUpdateResponse ShardCoordinator::update(
     if (all_blank) {
         response.is_error = true;
         response.error_message = "Invalid request: content must be non-whitespace";
+        if (metrics_) {
+            const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - start_time).count();
+            metrics_->record_coordinator_write(
+                static_cast<double>(elapsed) / 1000.0, false);
+        }
         return response;
     }
 
@@ -375,15 +465,28 @@ CoordinatorUpdateResponse ShardCoordinator::update(
     if (resp.is_error) {
         response.is_error = true;
         response.error_message = std::move(resp.error_message);
+        if (metrics_) {
+            const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - start_time).count();
+            metrics_->record_coordinator_write(
+                static_cast<double>(elapsed) / 1000.0, false);
+        }
         return response;
     }
 
     response.terms_indexed = resp.terms_indexed;
+    if (metrics_) {
+        const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - start_time).count();
+        metrics_->record_coordinator_write(
+            static_cast<double>(elapsed) / 1000.0, true);
+    }
     return response;
 }
 
 CoordinatorDeleteResponse ShardCoordinator::remove(doc_id id)
 {
+    const auto start_time = std::chrono::steady_clock::now();
     CoordinatorDeleteResponse response;
 
     const std::size_t shard_id = router_->route(id);
@@ -398,9 +501,21 @@ CoordinatorDeleteResponse ShardCoordinator::remove(doc_id id)
     if (resp.is_error) {
         response.is_error = true;
         response.error_message = std::move(resp.error_message);
+        if (metrics_) {
+            const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - start_time).count();
+            metrics_->record_coordinator_write(
+                static_cast<double>(elapsed) / 1000.0, false);
+        }
         return response;
     }
 
+    if (metrics_) {
+        const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - start_time).count();
+        metrics_->record_coordinator_write(
+            static_cast<double>(elapsed) / 1000.0, true);
+    }
     return response;
 }
 

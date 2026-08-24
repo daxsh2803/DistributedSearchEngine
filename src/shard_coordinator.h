@@ -32,6 +32,7 @@
 
 #include "document_store.h"  // for Document
 #include "inverted_index.h"   // for doc_id, Posting
+#include "metrics.h"
 #include "node_client.h"
 #include "node_config.h"
 #include "search_service.h"   // for SearchRequest, SearchResponse
@@ -79,6 +80,10 @@ public:
     ShardCoordinator(std::unique_ptr<ShardRouter> router,
                      std::unique_ptr<ShardPlacement> placement,
                      std::vector<std::unique_ptr<NodeClient>> nodes);
+
+    // Set an optional metrics collector for observability.
+    // Pass nullptr to disable metrics (default).
+    void set_metrics(MetricsCollector* metrics);
 
     // --- Search ---
     // Cross-shard search with global TF-IDF scoring.
@@ -129,6 +134,7 @@ private:
     std::unique_ptr<ShardRouter> router_;
     std::unique_ptr<ShardPlacement> placement_;
     std::vector<std::unique_ptr<NodeClient>> nodes_;
+    MetricsCollector* metrics_ = nullptr;  // optional, not owned
 };
 
 } // namespace dse

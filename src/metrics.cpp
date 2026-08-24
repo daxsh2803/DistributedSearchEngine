@@ -24,6 +24,8 @@ MetricsCollector::MetricsCollector(std::size_t latency_buffer_size)
     : latency_buffer_size_(latency_buffer_size)
 {
     latency_buffer_.resize(latency_buffer_size);
+    coord_search_latency_buffer_.resize(latency_buffer_size);
+    coord_write_latency_buffer_.resize(latency_buffer_size);
 }
 
 // ---------------------------------------------------------------------------
@@ -134,6 +136,64 @@ void MetricsCollector::record_circuit_breaker(std::size_t node_id,
 }
 
 // ---------------------------------------------------------------------------
+// Coordinator-level search metrics
+// ---------------------------------------------------------------------------
+
+void MetricsCollector::record_coordinator_search(double latency_ms,
+                                                 bool success,
+                                                 bool complete)
+{
+    coordinator_searches_total_.fetch_add(1, std::memory_order_relaxed);
+
+    if (success) {
+        coordinator_search_success_.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        coordinator_search_errors_.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    if (!complete) {
+        coordinator_search_incomplete_.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    // Record coordinator search latency.
+    {
+        std::lock_guard lock(mutex_);
+        coord_search_latency_buffer_[coord_search_latency_index_] = latency_ms;
+        coord_search_latency_index_ =
+            (coord_search_latency_index_ + 1) % latency_buffer_size_;
+        if (coord_search_latency_count_ < latency_buffer_size_) {
+            coord_search_latency_count_++;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Coordinator-level write metrics
+// ---------------------------------------------------------------------------
+
+void MetricsCollector::record_coordinator_write(double latency_ms, bool success)
+{
+    coordinator_writes_total_.fetch_add(1, std::memory_order_relaxed);
+
+    if (success) {
+        coordinator_write_success_.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        coordinator_write_errors_.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    // Record coordinator write latency.
+    {
+        std::lock_guard lock(mutex_);
+        coord_write_latency_buffer_[coord_write_latency_index_] = latency_ms;
+        coord_write_latency_index_ =
+            (coord_write_latency_index_ + 1) % latency_buffer_size_;
+        if (coord_write_latency_count_ < latency_buffer_size_) {
+            coord_write_latency_count_++;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Snapshot
 // ---------------------------------------------------------------------------
 
@@ -141,7 +201,7 @@ MetricsSnapshot MetricsCollector::snapshot() const
 {
     MetricsSnapshot snap;
 
-    // Copy atomic counters (relaxed is fine for monitoring).
+    // Copy node-level atomic counters.
     snap.searches_total = searches_total_.load(std::memory_order_relaxed);
     snap.search_errors = search_errors_.load(std::memory_order_relaxed);
     snap.search_incomplete = search_incomplete_.load(std::memory_order_relaxed);
@@ -151,12 +211,59 @@ MetricsSnapshot MetricsCollector::snapshot() const
     snap.circuit_open_events = circuit_open_events_.load(std::memory_order_relaxed);
     snap.circuit_close_events = circuit_close_events_.load(std::memory_order_relaxed);
 
-    // Compute latency stats from the buffer.
+    // Copy coordinator-level atomic counters.
+    snap.coordinator_searches_total = coordinator_searches_total_.load(std::memory_order_relaxed);
+    snap.coordinator_search_success = coordinator_search_success_.load(std::memory_order_relaxed);
+    snap.coordinator_search_incomplete = coordinator_search_incomplete_.load(std::memory_order_relaxed);
+    snap.coordinator_search_errors = coordinator_search_errors_.load(std::memory_order_relaxed);
+    snap.coordinator_writes_total = coordinator_writes_total_.load(std::memory_order_relaxed);
+    snap.coordinator_write_success = coordinator_write_success_.load(std::memory_order_relaxed);
+    snap.coordinator_write_errors = coordinator_write_errors_.load(std::memory_order_relaxed);
+
+    // Compute node-level latency stats.
     snap.search_latency = compute_latency_stats();
 
-    // Copy per-node metrics.
+    // Compute coordinator-level latency stats.
     {
         std::lock_guard lock(mutex_);
+
+        // Coordinator search latency.
+        if (coord_search_latency_count_ > 0) {
+            snap.coordinator_search_latency.sample_count = coord_search_latency_count_;
+            double sum = 0.0;
+            for (std::size_t i = 0; i < coord_search_latency_count_; ++i) {
+                sum += coord_search_latency_buffer_[i];
+            }
+            snap.coordinator_search_latency.average_ms =
+                sum / static_cast<double>(coord_search_latency_count_);
+
+            std::vector<double> sorted(coord_search_latency_buffer_.begin(),
+                                       coord_search_latency_buffer_.begin() + coord_search_latency_count_);
+            std::sort(sorted.begin(), sorted.end());
+            const std::size_t p99_index =
+                static_cast<std::size_t>(0.99 * static_cast<double>(sorted.size() - 1));
+            snap.coordinator_search_latency.p99_ms = sorted[p99_index];
+        }
+
+        // Coordinator write latency.
+        if (coord_write_latency_count_ > 0) {
+            snap.coordinator_write_latency.sample_count = coord_write_latency_count_;
+            double sum = 0.0;
+            for (std::size_t i = 0; i < coord_write_latency_count_; ++i) {
+                sum += coord_write_latency_buffer_[i];
+            }
+            snap.coordinator_write_latency.average_ms =
+                sum / static_cast<double>(coord_write_latency_count_);
+
+            std::vector<double> sorted(coord_write_latency_buffer_.begin(),
+                                       coord_write_latency_buffer_.begin() + coord_write_latency_count_);
+            std::sort(sorted.begin(), sorted.end());
+            const std::size_t p99_index =
+                static_cast<std::size_t>(0.99 * static_cast<double>(sorted.size() - 1));
+            snap.coordinator_write_latency.p99_ms = sorted[p99_index];
+        }
+
+        // Copy per-node metrics.
         snap.per_node = per_node_;
     }
 
@@ -171,6 +278,7 @@ void MetricsCollector::reset()
 {
     std::lock_guard lock(mutex_);
 
+    // Reset node-level counters.
     searches_total_.store(0, std::memory_order_relaxed);
     search_errors_.store(0, std::memory_order_relaxed);
     search_incomplete_.store(0, std::memory_order_relaxed);
@@ -180,9 +288,29 @@ void MetricsCollector::reset()
     circuit_open_events_.store(0, std::memory_order_relaxed);
     circuit_close_events_.store(0, std::memory_order_relaxed);
 
+    // Reset coordinator-level counters.
+    coordinator_searches_total_.store(0, std::memory_order_relaxed);
+    coordinator_search_success_.store(0, std::memory_order_relaxed);
+    coordinator_search_incomplete_.store(0, std::memory_order_relaxed);
+    coordinator_search_errors_.store(0, std::memory_order_relaxed);
+    coordinator_writes_total_.store(0, std::memory_order_relaxed);
+    coordinator_write_success_.store(0, std::memory_order_relaxed);
+    coordinator_write_errors_.store(0, std::memory_order_relaxed);
+
+    // Reset node-level latency buffer.
     latency_index_ = 0;
     latency_count_ = 0;
     std::fill(latency_buffer_.begin(), latency_buffer_.end(), 0.0);
+
+    // Reset coordinator-level latency buffers.
+    coord_search_latency_index_ = 0;
+    coord_search_latency_count_ = 0;
+    std::fill(coord_search_latency_buffer_.begin(),
+              coord_search_latency_buffer_.end(), 0.0);
+    coord_write_latency_index_ = 0;
+    coord_write_latency_count_ = 0;
+    std::fill(coord_write_latency_buffer_.begin(),
+              coord_write_latency_buffer_.end(), 0.0);
 
     per_node_.clear();
 }

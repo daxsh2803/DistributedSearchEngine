@@ -66,13 +66,13 @@ struct LatencyStats {
 // ---------------------------------------------------------------------------
 
 struct MetricsSnapshot {
-    // Search metrics
+    // Node-level search metrics (one per RemoteNode operation)
     std::uint64_t searches_total = 0;
     std::uint64_t search_errors = 0;
     std::uint64_t search_incomplete = 0;
     LatencyStats search_latency;
 
-    // Write metrics
+    // Node-level write metrics (one per RemoteNode operation)
     std::uint64_t writes_total = 0;
     std::uint64_t write_errors = 0;
 
@@ -82,6 +82,18 @@ struct MetricsSnapshot {
     // Circuit breaker metrics
     std::uint64_t circuit_open_events = 0;
     std::uint64_t circuit_close_events = 0;
+
+    // Coordinator-level metrics (one per user-initiated request)
+    std::uint64_t coordinator_searches_total = 0;
+    std::uint64_t coordinator_search_success = 0;
+    std::uint64_t coordinator_search_incomplete = 0;
+    std::uint64_t coordinator_search_errors = 0;
+    LatencyStats coordinator_search_latency;
+
+    std::uint64_t coordinator_writes_total = 0;
+    std::uint64_t coordinator_write_success = 0;
+    std::uint64_t coordinator_write_errors = 0;
+    LatencyStats coordinator_write_latency;
 
     // Per-node metrics
     std::unordered_map<std::size_t, NodeMetrics> per_node;
@@ -146,6 +158,21 @@ public:
     void record_circuit_breaker(std::size_t node_id,
                                 CircuitState new_state);
 
+    // --- Coordinator-level metrics (one per user-initiated request) ---
+
+    // Record a coordinator-level distributed search.
+    //   latency_ms   — end-to-end latency
+    //   success      — whether the search succeeded (is_error == false)
+    //   complete     — whether all shards participated
+    void record_coordinator_search(double latency_ms,
+                                   bool success,
+                                   bool complete);
+
+    // Record a coordinator-level write operation.
+    //   latency_ms   — end-to-end latency
+    //   success      — whether the write succeeded
+    void record_coordinator_write(double latency_ms, bool success);
+
     // Get a consistent snapshot of all metrics.
     // Thread-safe: acquires mutex, copies data, releases mutex.
     MetricsSnapshot snapshot() const;
@@ -171,12 +198,29 @@ private:
     std::atomic<std::uint64_t> circuit_open_events_{0};
     std::atomic<std::uint64_t> circuit_close_events_{0};
 
+    // Coordinator-level atomic counters
+    std::atomic<std::uint64_t> coordinator_searches_total_{0};
+    std::atomic<std::uint64_t> coordinator_search_success_{0};
+    std::atomic<std::uint64_t> coordinator_search_incomplete_{0};
+    std::atomic<std::uint64_t> coordinator_search_errors_{0};
+    std::atomic<std::uint64_t> coordinator_writes_total_{0};
+    std::atomic<std::uint64_t> coordinator_write_success_{0};
+    std::atomic<std::uint64_t> coordinator_write_errors_{0};
+
     // --- Mutex-protected state ---
     mutable std::mutex mutex_;
-    std::vector<double> latency_buffer_;  // circular buffer
+    std::vector<double> latency_buffer_;  // circular buffer (node-level)
     std::size_t latency_index_ = 0;      // next write position
     std::size_t latency_count_ = 0;      // total samples (capped at buffer size)
     std::size_t latency_buffer_size_;
+
+    // Coordinator-level latency buffers
+    std::vector<double> coord_search_latency_buffer_;
+    std::size_t coord_search_latency_index_ = 0;
+    std::size_t coord_search_latency_count_ = 0;
+    std::vector<double> coord_write_latency_buffer_;
+    std::size_t coord_write_latency_index_ = 0;
+    std::size_t coord_write_latency_count_ = 0;
 
     // Per-node metrics (protected by mutex_)
     std::unordered_map<std::size_t, NodeMetrics> per_node_;

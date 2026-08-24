@@ -258,6 +258,11 @@ if(BUILD_TESTING)
     target_compile_options(remote_node_metrics_test PRIVATE ${PROJECT_WARNINGS})
     target_link_libraries(remote_node_metrics_test PRIVATE GTest::gtest_main dse_core)
 
+    add_executable(coordinator_metrics_test tests/coordinator_metrics_test.cpp)
+    target_compile_options(coordinator_metrics_test PRIVATE ${PROJECT_WARNINGS})
+    target_link_libraries(coordinator_metrics_test PRIVATE GTest::gtest_main dse_core)
+
     gtest_discover_tests(metrics_test)
     gtest_discover_tests(remote_node_metrics_test)
+    gtest_discover_tests(coordinator_metrics_test)
 endif()
