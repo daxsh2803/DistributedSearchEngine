@@ -410,7 +410,7 @@ TEST(DocumentStoreConcurrency, AllReturnsSafeSnapshot)
 
     std::atomic<bool> writer_done{false};
 
-    // Writer thread: adds documents while snapshot is being iterated.
+    // Writer thread: adds documents concurrently.
     std::thread writer([&store, &writer_done]() {
         for (doc_id i = 100; i < 200; ++i) {
             store.add({i, "new"});
@@ -418,18 +418,36 @@ TEST(DocumentStoreConcurrency, AllReturnsSafeSnapshot)
         writer_done.store(true);
     });
 
-    // Take a snapshot and iterate it.
-    // The snapshot should be consistent even though the writer is active.
+    // Take a snapshot.  The writer may or may not have started adding
+    // documents by this point, so we cannot assume the exact size.
+    // The important invariant is that the snapshot is a self-consistent
+    // copy: all original documents are present, iteration is safe, and
+    // the snapshot does not change over time.
     const auto snapshot = store.all();
-    EXPECT_EQ(snapshot.size(), 30u);
 
-    // Iterate the snapshot (this is safe because it's a copy).
-    std::size_t count = 0;
-    for (const auto& [id, doc] : snapshot) {
-        EXPECT_LT(id, 30u);
-        ++count;
+    // The snapshot must contain at least the original 30 documents
+    // (the writer only adds IDs >= 100).
+    EXPECT_GE(snapshot.size(), 30u);
+
+    // All original documents must be present and correct.
+    for (doc_id i = 0; i < 30; ++i) {
+        auto it = snapshot.find(i);
+        ASSERT_NE(it, snapshot.end()) << "missing original doc " << i;
+        EXPECT_EQ(it->second.id, i);
+        EXPECT_EQ(it->second.content, "doc " + std::to_string(i));
     }
-    EXPECT_EQ(count, 30u);
+
+    // Verify the snapshot is stable (immutable copy).
+    std::size_t first_count = 0;
+    for (const auto& [id, doc] : snapshot) {
+        ++first_count;
+    }
+    std::size_t second_count = 0;
+    for (const auto& [id, doc] : snapshot) {
+        ++second_count;
+    }
+    EXPECT_EQ(first_count, second_count);
+    EXPECT_EQ(first_count, snapshot.size());
 
     writer.join();
 
