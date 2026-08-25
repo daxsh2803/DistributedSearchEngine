@@ -499,5 +499,163 @@ TEST(ShardCoordinatorReplicationTest, R2UpdatePreservesDocumentCount)
     EXPECT_EQ(coord->total_document_count(), 2u);
 }
 
+// =========================================================================
+// 16. Partial write failure: primary fails, secondary succeeds
+//      Write-all semantics require ALL replicas to succeed.
+// =========================================================================
+
+class PartialFailNode : public NodeClient {
+public:
+    PartialFailNode(std::size_t id, bool fail)
+        : node_id_(id), should_fail_(fail) {}
+
+    std::size_t node_id() const override { return node_id_; }
+
+    ShardSearchResponse search(const ShardSearchRequest& req) override {
+        ShardSearchResponse resp;
+        resp.shard_id = req.shard_id;
+        if (should_fail_) { resp.is_error = true; resp.error_message = "fail"; }
+        return resp;
+    }
+
+    ShardWriteResponse add_document(const ShardWriteRequest& req) override {
+        ShardWriteResponse resp;
+        resp.shard_id = req.shard_id;
+        resp.document_id = req.document_id;
+        if (should_fail_) {
+            resp.is_error = true;
+            resp.error_message = "node " + std::to_string(node_id_) + " unavailable";
+        } else {
+            resp.terms_indexed = 3;
+        }
+        return resp;
+    }
+
+    ShardWriteResponse update_document(const ShardWriteRequest& req) override {
+        ShardWriteResponse resp;
+        resp.shard_id = req.shard_id;
+        resp.document_id = req.document_id;
+        if (should_fail_) {
+            resp.is_error = true;
+            resp.error_message = "node " + std::to_string(node_id_) + " unavailable";
+        } else {
+            resp.terms_indexed = 3;
+        }
+        return resp;
+    }
+
+    ShardRemoveResponse remove_document(const ShardRemoveRequest& req) override {
+        ShardRemoveResponse resp;
+        resp.shard_id = req.shard_id;
+        if (should_fail_) { resp.is_error = true; resp.error_message = "fail"; }
+        return resp;
+    }
+
+    ShardGetResponse get_document(const ShardGetRequest& req) override {
+        ShardGetResponse resp;
+        resp.shard_id = req.shard_id;
+        resp.document_id = req.document_id;
+        if (should_fail_) { resp.is_error = true; resp.error_message = "fail"; }
+        return resp;
+    }
+
+    ShardCountResponse document_count(const ShardCountRequest& req) override {
+        ShardCountResponse resp;
+        resp.shard_id = req.shard_id;
+        if (should_fail_) { resp.is_error = true; resp.error_message = "fail"; }
+        return resp;
+    }
+
+    bool save_shard(std::size_t) override { return !should_fail_; }
+    bool load_shard(std::size_t) override { return !should_fail_; }
+
+private:
+    std::size_t node_id_;
+    bool should_fail_;
+};
+
+TEST(ShardCoordinatorReplicationTest, R2PartialWriteFailureIngestReportsError)
+{
+    // R=2: primary (node 0) fails, secondary (node 1) succeeds.
+    // Write-all semantics: overall operation must fail.
+    auto router = std::make_unique<ShardRouter>(1);
+    std::vector<ShardReplicaSet> replica_sets = {{0, {0, 1}}};
+    auto placement = std::make_unique<ShardReplicaPlacement>(1, 2, 2, replica_sets);
+
+    auto n0 = std::make_unique<PartialFailNode>(0, true);   // primary fails
+    auto n1 = std::make_unique<PartialFailNode>(1, false);  // secondary succeeds
+
+    std::vector<std::unique_ptr<NodeClient>> nodes;
+    nodes.push_back(std::move(n0));
+    nodes.push_back(std::move(n1));
+    auto coord = std::make_unique<ShardCoordinator>(
+        std::move(router), std::move(placement), std::move(nodes));
+
+    const auto resp = coord->ingest({1, "partial fail doc"});
+    EXPECT_TRUE(resp.is_error);
+    EXPECT_FALSE(resp.error_message.empty());
+}
+
+TEST(ShardCoordinatorReplicationTest, R2PartialWriteFailureUpdateReportsError)
+{
+    auto router = std::make_unique<ShardRouter>(1);
+    std::vector<ShardReplicaSet> replica_sets = {{0, {0, 1}}};
+    auto placement = std::make_unique<ShardReplicaPlacement>(1, 2, 2, replica_sets);
+
+    // Both nodes healthy for initial ingest.
+    auto n0h = std::make_unique<PartialFailNode>(0, false);
+    auto n1h = std::make_unique<PartialFailNode>(1, false);
+    std::vector<std::unique_ptr<NodeClient>> nodes_h;
+    nodes_h.push_back(std::move(n0h));
+    nodes_h.push_back(std::move(n1h));
+    auto coord = std::make_unique<ShardCoordinator>(
+        std::move(router), std::move(placement), std::move(nodes_h));
+
+    coord->ingest({1, "original"});
+
+    // Rebuild with primary failing for update.
+    // Note: we can't easily swap nodes, so we test via fresh coordinator.
+    auto router2 = std::make_unique<ShardRouter>(1);
+    std::vector<ShardReplicaSet> rs2 = {{0, {0, 1}}};
+    auto pl2 = std::make_unique<ShardReplicaPlacement>(1, 2, 2, rs2);
+
+    auto shard0 = std::make_unique<Shard>();
+    shard0->add_document(1, "original");
+    auto n0 = std::make_unique<LocalNode>(0);
+    n0->add_shard(0, std::move(shard0));
+    auto n1 = std::make_unique<PartialFailNode>(1, true);  // secondary fails
+
+    std::vector<std::unique_ptr<NodeClient>> nodes;
+    nodes.push_back(std::move(n0));
+    nodes.push_back(std::move(n1));
+    auto coord2 = std::make_unique<ShardCoordinator>(
+        std::move(router2), std::move(pl2), std::move(nodes));
+
+    const auto resp = coord2->update({1, "updated"});
+    EXPECT_TRUE(resp.is_error);
+}
+
+TEST(ShardCoordinatorReplicationTest, R2PartialWriteFailureRemoveReportsError)
+{
+    auto router = std::make_unique<ShardRouter>(1);
+    std::vector<ShardReplicaSet> replica_sets = {{0, {0, 1}}};
+    auto placement = std::make_unique<ShardReplicaPlacement>(1, 2, 2, replica_sets);
+
+    auto shard0 = std::make_unique<Shard>();
+    shard0->add_document(1, "to delete");
+    auto n0 = std::make_unique<LocalNode>(0);
+    n0->add_shard(0, std::move(shard0));
+    auto n1 = std::make_unique<PartialFailNode>(1, true);  // secondary fails
+
+    std::vector<std::unique_ptr<NodeClient>> nodes;
+    nodes.push_back(std::move(n0));
+    nodes.push_back(std::move(n1));
+    auto coord = std::make_unique<ShardCoordinator>(
+        std::move(router), std::move(placement), std::move(nodes));
+
+    const auto resp = coord->remove(1);
+    EXPECT_TRUE(resp.is_error);
+}
+
 } // namespace
 } // namespace dse

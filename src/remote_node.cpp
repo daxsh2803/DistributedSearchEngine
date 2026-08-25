@@ -475,6 +475,7 @@ ShardGetResponse RemoteNode::get_document(const ShardGetRequest& request)
             metrics_->record_write("get", node_id_,
                                    elapsed_ms(start_time), false);
         }
+        observe_circuit_breaker();
         return response;
     }
 
@@ -562,6 +563,7 @@ ShardCountResponse RemoteNode::document_count(const ShardCountRequest& request)
             metrics_->record_search(node_id_, request.shard_id,
                                     elapsed_ms(start_time), false, false);
         }
+        observe_circuit_breaker();
         return response;
     }
 
