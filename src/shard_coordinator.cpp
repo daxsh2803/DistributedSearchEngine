@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "document_event.h"
+#include "event_dispatcher.h"
 #include "inverted_index.h"
 #include "message.h"
 #include "metrics.h"
@@ -65,9 +66,9 @@ void ShardCoordinator::set_metrics(MetricsCollector* metrics)
     metrics_ = metrics;
 }
 
-void ShardCoordinator::set_broker(MessageBroker* broker)
+void ShardCoordinator::set_event_dispatcher(EventDispatcher* dispatcher)
 {
-    broker_ = broker;
+    dispatcher_ = dispatcher;
 }
 
 // ---------------------------------------------------------------------------
@@ -482,12 +483,11 @@ CoordinatorIngestResponse ShardCoordinator::ingest(
     }
 
     // Publish domain event on success (one event per logical operation).
-    if (!response.is_error && broker_) {
+    if (!response.is_error && dispatcher_) {
         const std::size_t shard_id = router_->route(request.id);
-        Message msg;
-        msg.topic = topics::kDocumentIndexed;
-        msg.payload = event_json::to_json(DocumentIndexedEvent{request.id, shard_id});
-        broker_->publish(std::move(msg));
+        dispatcher_->enqueue(
+            topics::kDocumentIndexed,
+            event_json::to_json(DocumentIndexedEvent{request.id, shard_id}));
     }
 
     return response;
@@ -576,12 +576,11 @@ CoordinatorUpdateResponse ShardCoordinator::update(
     }
 
     // Publish domain event on success (one event per logical operation).
-    if (!response.is_error && broker_) {
+    if (!response.is_error && dispatcher_) {
         const std::size_t shard_id = router_->route(request.id);
-        Message msg;
-        msg.topic = topics::kDocumentUpdated;
-        msg.payload = event_json::to_json(DocumentUpdatedEvent{request.id, shard_id});
-        broker_->publish(std::move(msg));
+        dispatcher_->enqueue(
+            topics::kDocumentUpdated,
+            event_json::to_json(DocumentUpdatedEvent{request.id, shard_id}));
     }
 
     return response;
@@ -634,12 +633,11 @@ CoordinatorDeleteResponse ShardCoordinator::remove(doc_id id)
     }
 
     // Publish domain event on success (one event per logical operation).
-    if (!response.is_error && broker_) {
+    if (!response.is_error && dispatcher_) {
         const std::size_t shard_id = router_->route(id);
-        Message msg;
-        msg.topic = topics::kDocumentRemoved;
-        msg.payload = event_json::to_json(DocumentRemovedEvent{id, shard_id});
-        broker_->publish(std::move(msg));
+        dispatcher_->enqueue(
+            topics::kDocumentRemoved,
+            event_json::to_json(DocumentRemovedEvent{id, shard_id}));
     }
 
     return response;

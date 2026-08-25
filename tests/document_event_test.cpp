@@ -1,4 +1,4 @@
-// Distributed Search Engine - Document Event Tests (Phase 18C).
+// Distributed Search Engine - Document Event Tests (Phase 18C/18D).
 //
 // Tests for domain event publication after successful document mutations.
 // Verifies that:
@@ -6,8 +6,9 @@
 //   - Failed mutations publish no events
 //   - Event payloads are correct JSON
 //   - No double-counting with replication factor R=2
-//   - No broker = no events (backward compatibility)
+//   - No dispatcher = no events (backward compatibility)
 //   - Event topics are correct
+//   - Asynchronous dispatch works correctly
 
 #include "shard_coordinator.h"
 
@@ -21,6 +22,7 @@
 #include <vector>
 
 #include "document_event.h"
+#include "event_dispatcher.h"
 #include "in_memory_message_broker.h"
 #include "inverted_index.h"
 #include "local_node.h"
@@ -38,9 +40,9 @@ namespace {
 // Test helpers
 // ---------------------------------------------------------------------------
 
-// Create a coordinator with N shards, 1 node, and an optional broker.
+// Create a coordinator with N shards, 1 node, and an optional dispatcher.
 std::unique_ptr<ShardCoordinator> make_coord(
-    std::size_t n, MessageBroker* broker = nullptr)
+    std::size_t n, EventDispatcher* dispatcher = nullptr)
 {
     auto router = std::make_unique<ShardRouter>(n);
     std::vector<std::size_t> placement(n, 0);
@@ -56,18 +58,17 @@ std::unique_ptr<ShardCoordinator> make_coord(
 
     auto coord = std::make_unique<ShardCoordinator>(
         std::move(router), std::move(rp), std::move(nodes));
-    coord->set_broker(broker);
+    coord->set_event_dispatcher(dispatcher);
     return coord;
 }
 
-// Create a coordinator with R=2 replication and an optional broker.
+// Create a coordinator with R=2 replication and an optional dispatcher.
 std::unique_ptr<ShardCoordinator> make_coord_r2(
-    std::size_t n, MessageBroker* broker = nullptr)
+    std::size_t n, EventDispatcher* dispatcher = nullptr)
 {
     auto router = std::make_unique<ShardRouter>(n);
     std::vector<ShardReplicaSet> replica_sets;
     for (std::size_t sid = 0; sid < n; ++sid) {
-        // Two nodes per shard: node 0 and node 1.
         replica_sets.push_back({sid, {0, 1}});
     }
     auto rp = std::make_unique<ShardReplicaPlacement>(
@@ -86,7 +87,7 @@ std::unique_ptr<ShardCoordinator> make_coord_r2(
 
     auto coord = std::make_unique<ShardCoordinator>(
         std::move(router), std::move(rp), std::move(nodes));
-    coord->set_broker(broker);
+    coord->set_event_dispatcher(dispatcher);
     return coord;
 }
 
@@ -135,7 +136,7 @@ TEST(DocumentEventTest, TopicNamesAreCorrect)
 }
 
 // ---------------------------------------------------------------------------
-// Successful operations produce events
+// Successful operations produce events (async dispatch)
 // ---------------------------------------------------------------------------
 
 TEST(DocumentEventTest, SuccessfulIngestProducesIndexedEvent)
@@ -149,10 +150,14 @@ TEST(DocumentEventTest, SuccessfulIngestProducesIndexedEvent)
     });
     broker.start();
 
-    auto coord = make_coord(3, &broker);
+    EventDispatcher dispatcher(broker);
+    dispatcher.start();
+
+    auto coord = make_coord(3, &dispatcher);
     const auto resp = coord->ingest({1, "hello world"});
     ASSERT_FALSE(resp.is_error);
 
+    dispatcher.stop();
     broker.stop();
     EXPECT_EQ(broker.stats().messages_acknowledged, 1u);
 }
@@ -168,11 +173,15 @@ TEST(DocumentEventTest, SuccessfulUpdateProducesUpdatedEvent)
     });
     broker.start();
 
-    auto coord = make_coord(3, &broker);
+    EventDispatcher dispatcher(broker);
+    dispatcher.start();
+
+    auto coord = make_coord(3, &dispatcher);
     coord->ingest({5, "original"});
     const auto resp = coord->update({5, "updated content"});
     ASSERT_FALSE(resp.is_error);
 
+    dispatcher.stop();
     broker.stop();
     EXPECT_EQ(broker.stats().messages_acknowledged, 1u);
 }
@@ -188,11 +197,15 @@ TEST(DocumentEventTest, SuccessfulRemoveProducesRemovedEvent)
     });
     broker.start();
 
-    auto coord = make_coord(3, &broker);
+    EventDispatcher dispatcher(broker);
+    dispatcher.start();
+
+    auto coord = make_coord(3, &dispatcher);
     coord->ingest({10, "to be removed"});
     const auto resp = coord->remove(10);
     ASSERT_FALSE(resp.is_error);
 
+    dispatcher.stop();
     broker.stop();
     EXPECT_EQ(broker.stats().messages_acknowledged, 1u);
 }
@@ -211,10 +224,14 @@ TEST(DocumentEventTest, FailedIngestProducesNoEvent)
     });
     broker.start();
 
-    auto coord = make_coord(3, &broker);
+    EventDispatcher dispatcher(broker);
+    dispatcher.start();
+
+    auto coord = make_coord(3, &dispatcher);
     const auto resp = coord->ingest({1, ""});  // Empty content = failure.
     ASSERT_TRUE(resp.is_error);
 
+    dispatcher.stop();
     broker.stop();
     EXPECT_EQ(event_count.load(), 0);
     EXPECT_EQ(broker.stats().messages_acknowledged, 0u);
@@ -230,28 +247,32 @@ TEST(DocumentEventTest, FailedUpdateProducesNoEvent)
     });
     broker.start();
 
-    auto coord = make_coord(3, &broker);
+    EventDispatcher dispatcher(broker);
+    dispatcher.start();
+
+    auto coord = make_coord(3, &dispatcher);
     const auto resp = coord->update({1, ""});  // Empty content = failure.
     ASSERT_TRUE(resp.is_error);
 
+    dispatcher.stop();
     broker.stop();
     EXPECT_EQ(event_count.load(), 0);
     EXPECT_EQ(broker.stats().messages_acknowledged, 0u);
 }
 
 // ---------------------------------------------------------------------------
-// No broker = no events (backward compatibility)
+// No dispatcher = no events (backward compatibility)
 // ---------------------------------------------------------------------------
 
-TEST(DocumentEventTest, NoBrokerMeansNoEvents)
+TEST(DocumentEventTest, NoDispatcherMeansNoEvents)
 {
-    auto coord = make_coord(3, nullptr);  // No broker.
+    auto coord = make_coord(3, nullptr);  // No dispatcher.
     const auto resp = coord->ingest({1, "hello"});
     ASSERT_FALSE(resp.is_error);
-    // Just verify it doesn't crash — no broker means no event publishing.
+    // Just verify it doesn't crash — no dispatcher means no event publishing.
 }
 
-TEST(DocumentEventTest, NoBrokerUpdateDoesNotCrash)
+TEST(DocumentEventTest, NoDispatcherUpdateDoesNotCrash)
 {
     auto coord = make_coord(3, nullptr);
     coord->ingest({1, "hello"});
@@ -259,7 +280,7 @@ TEST(DocumentEventTest, NoBrokerUpdateDoesNotCrash)
     ASSERT_FALSE(resp.is_error);
 }
 
-TEST(DocumentEventTest, NoBrokerRemoveDoesNotCrash)
+TEST(DocumentEventTest, NoDispatcherRemoveDoesNotCrash)
 {
     auto coord = make_coord(3, nullptr);
     coord->ingest({1, "hello"});
@@ -284,10 +305,14 @@ TEST(DocumentEventTest, R2IngestProducesExactlyOneIndexedEvent)
     });
     broker.start();
 
-    auto coord = make_coord_r2(2, &broker);
+    EventDispatcher dispatcher(broker);
+    dispatcher.start();
+
+    auto coord = make_coord_r2(2, &dispatcher);
     const auto resp = coord->ingest({1, "replicated doc"});
     ASSERT_FALSE(resp.is_error);
 
+    dispatcher.stop();
     broker.stop();
     EXPECT_EQ(event_count.load(), 1);  // One event, not two.
     EXPECT_EQ(broker.stats().messages_acknowledged, 1u);
@@ -303,11 +328,15 @@ TEST(DocumentEventTest, R2UpdateProducesExactlyOneUpdatedEvent)
     });
     broker.start();
 
-    auto coord = make_coord_r2(2, &broker);
+    EventDispatcher dispatcher(broker);
+    dispatcher.start();
+
+    auto coord = make_coord_r2(2, &dispatcher);
     coord->ingest({1, "original"});
     const auto resp = coord->update({1, "updated"});
     ASSERT_FALSE(resp.is_error);
 
+    dispatcher.stop();
     broker.stop();
     EXPECT_EQ(event_count.load(), 1);  // One event, not two.
 }
@@ -322,11 +351,15 @@ TEST(DocumentEventTest, R2RemoveProducesExactlyOneRemovedEvent)
     });
     broker.start();
 
-    auto coord = make_coord_r2(2, &broker);
+    EventDispatcher dispatcher(broker);
+    dispatcher.start();
+
+    auto coord = make_coord_r2(2, &dispatcher);
     coord->ingest({1, "to remove"});
     const auto resp = coord->remove(1);
     ASSERT_FALSE(resp.is_error);
 
+    dispatcher.stop();
     broker.stop();
     EXPECT_EQ(event_count.load(), 1);  // One event, not two.
 }
@@ -345,11 +378,15 @@ TEST(DocumentEventTest, MultipleIngestsProduceMultipleEvents)
     });
     broker.start();
 
-    auto coord = make_coord(3, &broker);
+    EventDispatcher dispatcher(broker);
+    dispatcher.start();
+
+    auto coord = make_coord(3, &dispatcher);
     for (doc_id i = 0; i < 5; ++i) {
         coord->ingest({i, "doc " + std::to_string(i)});
     }
 
+    dispatcher.stop();
     broker.stop();
     EXPECT_EQ(event_count.load(), 5);
     EXPECT_EQ(broker.stats().messages_acknowledged, 5u);
@@ -370,9 +407,13 @@ TEST(DocumentEventTest, EventContainsCorrectShardId)
     });
     broker.start();
 
-    auto coord = make_coord(4, &broker);  // 4 shards
+    EventDispatcher dispatcher(broker);
+    dispatcher.start();
+
+    auto coord = make_coord(4, &dispatcher);  // 4 shards
     coord->ingest({1, "hello"});
 
+    dispatcher.stop();
     broker.stop();
     // Shard assignment depends on routing — just verify it's a valid shard.
     EXPECT_LT(captured_shard, 4u);
@@ -400,11 +441,15 @@ TEST(DocumentEventTest, IngestUpdateRemoveAllProduceEvents)
     });
     broker.start();
 
-    auto coord = make_coord(3, &broker);
+    EventDispatcher dispatcher(broker);
+    dispatcher.start();
+
+    auto coord = make_coord(3, &dispatcher);
     coord->ingest({1, "hello"});
     coord->update({1, "world"});
     coord->remove(1);
 
+    dispatcher.stop();
     broker.stop();
     EXPECT_EQ(indexed.load(), 1);
     EXPECT_EQ(updated.load(), 1);

@@ -80,7 +80,8 @@ add_library(dse_core STATIC
     src/metrics.cpp
     src/replica_placement.cpp
     src/in_memory_message_broker.cpp
-    src/document_event.cpp)
+    src/document_event.cpp
+    src/event_dispatcher.cpp)
 target_include_directories(dse_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_options(dse_core PRIVATE ${PROJECT_WARNINGS})
 target_link_libraries(dse_core PUBLIC httplib::httplib nlohmann_json::nlohmann_json)
@@ -303,6 +304,11 @@ if(BUILD_TESTING)
     target_compile_options(document_event_test PRIVATE ${PROJECT_WARNINGS})
     target_link_libraries(document_event_test PRIVATE GTest::gtest_main dse_core)
 
+    add_executable(event_dispatcher_test tests/event_dispatcher_test.cpp)
+    target_compile_options(event_dispatcher_test PRIVATE ${PROJECT_WARNINGS})
+    target_link_libraries(event_dispatcher_test PRIVATE GTest::gtest_main dse_core)
+
     gtest_discover_tests(message_broker_test)
     gtest_discover_tests(document_event_test)
+    gtest_discover_tests(event_dispatcher_test)
 endif()
