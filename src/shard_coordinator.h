@@ -32,6 +32,7 @@
 
 #include "document_store.h"  // for Document
 #include "inverted_index.h"   // for doc_id, Posting
+#include "message_broker.h"
 #include "metrics.h"
 #include "node_client.h"
 #include "node_config.h"
@@ -92,6 +93,13 @@ public:
     // Pass nullptr to disable metrics (default).
     void set_metrics(MetricsCollector* metrics);
 
+    // Set an optional message broker for domain event publication.
+    // Pass nullptr to disable event publishing (default).
+    // When set, successful document mutations publish domain events
+    // to the broker asynchronously. One event per logical user operation,
+    // regardless of replication factor.
+    void set_broker(MessageBroker* broker);
+
     // --- Search ---
     // Cross-shard search with global TF-IDF scoring.
     // Issues parallel fan-out to all nodes via std::async.
@@ -145,6 +153,7 @@ private:
     std::unique_ptr<ShardReplicaPlacement> placement_;
     std::vector<std::unique_ptr<NodeClient>> nodes_;
     MetricsCollector* metrics_ = nullptr;  // optional, not owned
+    MessageBroker* broker_ = nullptr;      // optional, not owned
 };
 
 } // namespace dse

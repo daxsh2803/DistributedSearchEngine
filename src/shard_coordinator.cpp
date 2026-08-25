@@ -18,7 +18,9 @@
 #include <utility>
 #include <vector>
 
+#include "document_event.h"
 #include "inverted_index.h"
+#include "message.h"
 #include "metrics.h"
 #include "node_client.h"
 #include "node_config.h"
@@ -61,6 +63,11 @@ ShardCoordinator::ShardCoordinator(
 void ShardCoordinator::set_metrics(MetricsCollector* metrics)
 {
     metrics_ = metrics;
+}
+
+void ShardCoordinator::set_broker(MessageBroker* broker)
+{
+    broker_ = broker;
 }
 
 // ---------------------------------------------------------------------------
@@ -473,6 +480,16 @@ CoordinatorIngestResponse ShardCoordinator::ingest(
         metrics_->record_coordinator_write(
             static_cast<double>(elapsed) / 1000.0, !response.is_error);
     }
+
+    // Publish domain event on success (one event per logical operation).
+    if (!response.is_error && broker_) {
+        const std::size_t shard_id = router_->route(request.id);
+        Message msg;
+        msg.topic = topics::kDocumentIndexed;
+        msg.payload = event_json::to_json(DocumentIndexedEvent{request.id, shard_id});
+        broker_->publish(std::move(msg));
+    }
+
     return response;
 }
 
@@ -557,6 +574,16 @@ CoordinatorUpdateResponse ShardCoordinator::update(
         metrics_->record_coordinator_write(
             static_cast<double>(elapsed) / 1000.0, !response.is_error);
     }
+
+    // Publish domain event on success (one event per logical operation).
+    if (!response.is_error && broker_) {
+        const std::size_t shard_id = router_->route(request.id);
+        Message msg;
+        msg.topic = topics::kDocumentUpdated;
+        msg.payload = event_json::to_json(DocumentUpdatedEvent{request.id, shard_id});
+        broker_->publish(std::move(msg));
+    }
+
     return response;
 }
 
@@ -605,6 +632,16 @@ CoordinatorDeleteResponse ShardCoordinator::remove(doc_id id)
         metrics_->record_coordinator_write(
             static_cast<double>(elapsed) / 1000.0, !response.is_error);
     }
+
+    // Publish domain event on success (one event per logical operation).
+    if (!response.is_error && broker_) {
+        const std::size_t shard_id = router_->route(id);
+        Message msg;
+        msg.topic = topics::kDocumentRemoved;
+        msg.payload = event_json::to_json(DocumentRemovedEvent{id, shard_id});
+        broker_->publish(std::move(msg));
+    }
+
     return response;
 }
 
