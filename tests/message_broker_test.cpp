@@ -37,12 +37,14 @@
 
 #include "message.h"
 #include "message_broker.h"
+#include "in_memory_message_broker.h"
 
 using dse::BrokerConfig;
 using dse::BrokerStats;
 using dse::DeliveryState;
 using dse::Message;
 using dse::MessageBroker;
+using dse::InMemoryMessageBroker;
 using dse::Offset;
 
 // Helper: create a message with topic and payload set.
@@ -84,14 +86,14 @@ TEST(MessageTest, ConstructedWithPayload)
 
 TEST(MessageBrokerTest, PublishReturnsOffset)
 {
-    MessageBroker broker;
+    InMemoryMessageBroker broker;
     Offset off = broker.publish(make_msg("t", "m1"));
     EXPECT_EQ(off, 0u);
 }
 
 TEST(MessageBrokerTest, PublishMultipleReturnsMonotonicOffsets)
 {
-    MessageBroker broker;
+    InMemoryMessageBroker broker;
     Offset o1 = broker.publish(make_msg("t", "m1"));
     Offset o2 = broker.publish(make_msg("t", "m2"));
     Offset o3 = broker.publish(make_msg("t", "m3"));
@@ -102,7 +104,7 @@ TEST(MessageBrokerTest, PublishMultipleReturnsMonotonicOffsets)
 
 TEST(MessageBrokerTest, PublishAndConsume)
 {
-    MessageBroker broker;
+    InMemoryMessageBroker broker;
     std::string received;
 
     broker.subscribe("t", [&](const Message& msg) -> bool {
@@ -123,7 +125,7 @@ TEST(MessageBrokerTest, PublishAndConsume)
 
 TEST(MessageBrokerTest, ConsumeMultipleMessages)
 {
-    MessageBroker broker;
+    InMemoryMessageBroker broker;
     std::atomic<int> count{0};
 
     broker.subscribe("t", [&](const Message&) -> bool {
@@ -150,7 +152,7 @@ TEST(MessageBrokerTest, ConsumeMultipleMessages)
 
 TEST(MessageBrokerTest, FIFOOrdering)
 {
-    MessageBroker broker;
+    InMemoryMessageBroker broker;
     std::vector<std::string> received;
     std::mutex vec_mutex;
 
@@ -184,7 +186,7 @@ TEST(MessageBrokerTest, FIFOOrdering)
 
 TEST(MessageBrokerTest, MultipleTopics)
 {
-    MessageBroker broker;
+    InMemoryMessageBroker broker;
     std::string topic_a, topic_b;
 
     broker.subscribe("a", [&](const Message& msg) -> bool {
@@ -215,7 +217,7 @@ TEST(MessageBrokerTest, MultipleTopics)
 
 TEST(MessageBrokerTest, PublishWithoutSubscriberQueuesUp)
 {
-    MessageBroker broker;
+    InMemoryMessageBroker broker;
     broker.publish(make_msg("t", "m1"));
     broker.publish(make_msg("t", "m2"));
 
@@ -245,7 +247,7 @@ TEST(MessageBrokerTest, PublishWithTimeoutReturnsNulloptWhenFull)
 {
     BrokerConfig config;
     config.max_queue_size = 2;
-    MessageBroker broker(config);
+    InMemoryMessageBroker broker(config);
 
     // Fill queue (no subscriber to drain it).
     broker.publish(make_msg("t", "m1"));
@@ -260,7 +262,7 @@ TEST(MessageBrokerTest, PublishWithTimeoutSucceedsWhenSpaceAvailable)
 {
     BrokerConfig config;
     config.max_queue_size = 2;
-    MessageBroker broker(config);
+    InMemoryMessageBroker broker(config);
 
     // Fill queue.
     broker.publish(make_msg("t", "m1"));
@@ -292,7 +294,7 @@ TEST(MessageBrokerTest, PublishWithTimeoutSucceedsWhenSpaceAvailable)
 
 TEST(MessageBrokerTest, SuccessfulProcessingAcknowledges)
 {
-    MessageBroker broker;
+    InMemoryMessageBroker broker;
     std::atomic<bool> processed{false};
 
     broker.subscribe("t", [&](const Message&) -> bool {
@@ -321,7 +323,7 @@ TEST(MessageBrokerTest, SuccessfulProcessingAcknowledges)
 
 TEST(MessageBrokerTest, FailedProcessingRetriesThenSucceeds)
 {
-    MessageBroker broker;
+    InMemoryMessageBroker broker;
     std::atomic<int> attempts{0};
 
     broker.subscribe("t", [&](const Message&) -> bool {
@@ -351,7 +353,7 @@ TEST(MessageBrokerTest, DeadLetterAfterMaxRetries)
 {
     BrokerConfig config;
     config.max_delivery_attempts = 3;
-    MessageBroker broker(config);
+    InMemoryMessageBroker broker(config);
 
     broker.subscribe("t", [](const Message&) -> bool {
         return false;  // always fail
@@ -387,7 +389,7 @@ TEST(MessageBrokerTest, HandlerExceptionTreatedAsFailure)
 {
     BrokerConfig config;
     config.max_delivery_attempts = 1;  // no retries
-    MessageBroker broker(config);
+    InMemoryMessageBroker broker(config);
 
     broker.subscribe("t", [](const Message&) -> bool {
         throw std::runtime_error("boom");
@@ -416,7 +418,7 @@ TEST(MessageBrokerTest, IdempotentConsumerSkipsDuplicate)
     BrokerConfig config;
     config.enable_idempotency = true;
     config.max_delivery_attempts = 3;
-    MessageBroker broker(config);
+    InMemoryMessageBroker broker(config);
 
     std::atomic<int> attempts{0};
 
@@ -447,7 +449,7 @@ TEST(MessageBrokerTest, IdempotentConsumerSkipsDuplicate)
     // We can test this by manually checking was_processed().
     BrokerConfig config2;
     config2.enable_idempotency = true;
-    MessageBroker broker2(config2);
+    InMemoryMessageBroker broker2(config2);
 
     std::atomic<int> handler_calls{0};
     broker2.subscribe("t", [&](const Message&) -> bool {
@@ -473,7 +475,7 @@ TEST(MessageBrokerTest, IdempotentConsumerTracksProcessedIds)
 {
     BrokerConfig config;
     config.enable_idempotency = true;
-    MessageBroker broker(config);
+    InMemoryMessageBroker broker(config);
 
     broker.subscribe("t", [](const Message&) -> bool {
         return true;
@@ -497,7 +499,7 @@ TEST(MessageBrokerTest, IdempotentConsumerTracksProcessedIds)
 
 TEST(MessageBrokerTest, StatsTrackPublishes)
 {
-    MessageBroker broker;
+    InMemoryMessageBroker broker;
     broker.publish(make_msg("t", "m1"));
     broker.publish(make_msg("t", "m2"));
     broker.publish(make_msg("t", "m3"));
@@ -510,7 +512,7 @@ TEST(MessageBrokerTest, StatsTrackPublishes)
 
 TEST(MessageBrokerTest, StatsTrackAcknowledges)
 {
-    MessageBroker broker;
+    InMemoryMessageBroker broker;
     std::atomic<int> count{0};
 
     broker.subscribe("t", [&](const Message&) -> bool {
@@ -535,7 +537,7 @@ TEST(MessageBrokerTest, StatsTrackRetries)
 {
     BrokerConfig config;
     config.max_delivery_attempts = 3;
-    MessageBroker broker(config);
+    InMemoryMessageBroker broker(config);
 
     std::atomic<int> attempts{0};
     broker.subscribe("t", [&](const Message&) -> bool {
@@ -564,7 +566,7 @@ TEST(MessageBrokerTest, DeadLettersAccessible)
 {
     BrokerConfig config;
     config.max_delivery_attempts = 2;
-    MessageBroker broker(config);
+    InMemoryMessageBroker broker(config);
 
     broker.subscribe("t", [](const Message&) -> bool {
         return false;
@@ -597,7 +599,7 @@ TEST(MessageBrokerTest, DeadLettersAccessible)
 
 TEST(MessageBrokerTest, QueueSizeReflectsPending)
 {
-    MessageBroker broker;
+    InMemoryMessageBroker broker;
     EXPECT_EQ(broker.queue_size("t"), 0u);
 
     broker.publish(make_msg("t", "m1"));
@@ -616,7 +618,7 @@ TEST(MessageBrokerTest, QueueSizeReflectsPending)
 
 TEST(MessageBrokerTest, ShutdownEmptyQueue)
 {
-    MessageBroker broker;
+    InMemoryMessageBroker broker;
     broker.subscribe("t", [](const Message&) -> bool {
         return true;
     });
@@ -631,7 +633,7 @@ TEST(MessageBrokerTest, ShutdownEmptyQueue)
 
 TEST(MessageBrokerTest, ShutdownDrainsQueue)
 {
-    MessageBroker broker;
+    InMemoryMessageBroker broker;
     std::atomic<int> count{0};
 
     broker.subscribe("t", [&](const Message&) -> bool {
@@ -657,7 +659,7 @@ TEST(MessageBrokerTest, ShutdownDrainsQueue)
 
 TEST(MessageBrokerTest, ShutdownWaitsForInFlightMessage)
 {
-    MessageBroker broker;
+    InMemoryMessageBroker broker;
     std::atomic<bool> handler_started{false};
     std::atomic<bool> handler_done{false};
 
@@ -689,7 +691,7 @@ TEST(MessageBrokerTest, ShutdownWaitsForInFlightMessage)
 
 TEST(MessageBrokerTest, ConcurrentPublishers)
 {
-    MessageBroker broker;
+    InMemoryMessageBroker broker;
     constexpr int kThreads = 8;
     constexpr int kPerThread = 100;
 
@@ -719,7 +721,7 @@ TEST(MessageBrokerTest, ConcurrentConsumers)
 {
     BrokerConfig config;
     config.consumer_threads = 4;
-    MessageBroker broker(config);
+    InMemoryMessageBroker broker(config);
 
     std::atomic<int> count{0};
     constexpr int kMessages = 100;
@@ -748,7 +750,7 @@ TEST(MessageBrokerTest, ConcurrentConsumers)
 
 TEST(MessageBrokerTest, ConcurrentPublishAndConsume)
 {
-    MessageBroker broker;
+    InMemoryMessageBroker broker;
     std::atomic<int> consumed{0};
     constexpr int kPublishers = 4;
     constexpr int kPerPublisher = 50;
@@ -787,7 +789,7 @@ TEST(MessageBrokerTest, ConcurrentPublishAndConsume)
 
 TEST(MessageBrokerTest, OffsetMonotonicPerTopic)
 {
-    MessageBroker broker;
+    InMemoryMessageBroker broker;
 
     Offset o1 = broker.publish(make_msg("a", "m1"));
     Offset o2 = broker.publish(make_msg("b", "m2"));
@@ -807,7 +809,7 @@ TEST(MessageBrokerTest, OffsetMonotonicPerTopic)
 
 TEST(MessageBrokerTest, SubscribeAfterStartThrows)
 {
-    MessageBroker broker;
+    InMemoryMessageBroker broker;
     broker.subscribe("t", [](const Message&) -> bool { return true; });
     broker.start();
 
@@ -824,7 +826,7 @@ TEST(MessageBrokerTest, SubscribeAfterStartThrows)
 
 TEST(MessageBrokerTest, StopBeforeStartIsSafe)
 {
-    MessageBroker broker;
+    InMemoryMessageBroker broker;
     broker.stop();
     SUCCEED();
 }
@@ -835,7 +837,7 @@ TEST(MessageBrokerTest, StopBeforeStartIsSafe)
 
 TEST(MessageBrokerTest, DoubleStopIsSafe)
 {
-    MessageBroker broker;
+    InMemoryMessageBroker broker;
     broker.subscribe("t", [](const Message&) -> bool { return true; });
     broker.start();
     broker.stop();
@@ -849,7 +851,7 @@ TEST(MessageBrokerTest, DoubleStopIsSafe)
 
 TEST(MessageBrokerTest, DeadLetterDuringShutdown)
 {
-    MessageBroker broker;
+    InMemoryMessageBroker broker;
     std::atomic<int> attempts{0};
 
     broker.subscribe("t", [&](const Message&) -> bool {
@@ -882,7 +884,7 @@ TEST(MessageBrokerTest, DeadLetterDuringShutdown)
 
 TEST(MessageBrokerTest, PublishWithTimeoutImmediateSuccess)
 {
-    MessageBroker broker;
+    InMemoryMessageBroker broker;
     auto result = broker.publish_with_timeout(make_msg("t", "m1"), 100);
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(*result, 0u);
@@ -898,7 +900,7 @@ TEST(MessageBrokerTest, ConcurrentStress)
     config.max_queue_size = 50;
     config.max_delivery_attempts = 2;
     config.consumer_threads = 2;
-    MessageBroker broker(config);
+    InMemoryMessageBroker broker(config);
 
     std::atomic<int> consumed_a{0};
     std::atomic<int> consumed_b{0};
@@ -962,7 +964,7 @@ TEST(MessageBrokerTest, ConcurrentStress)
 
 TEST(MessageBrokerTest, BrokerAssignsIdAndTimestamp)
 {
-    MessageBroker broker;
+    InMemoryMessageBroker broker;
     Message received;
 
     broker.subscribe("t", [&](const Message& msg) -> bool {
@@ -995,7 +997,7 @@ TEST(MessageBrokerTest, DeliveryAttemptTracked)
 {
     BrokerConfig config;
     config.max_delivery_attempts = 5;
-    MessageBroker broker(config);
+    InMemoryMessageBroker broker(config);
 
     std::vector<std::size_t> observed_attempts;
 
@@ -1019,4 +1021,115 @@ TEST(MessageBrokerTest, DeliveryAttemptTracked)
     for (std::size_t i = 0; i < observed_attempts.size(); ++i) {
         EXPECT_EQ(observed_attempts[i], i + 1);
     }
+}
+
+// ===========================================================================
+// 30. Abstract interface: publish/consume through MessageBroker*
+// ===========================================================================
+
+TEST(MessageBrokerInterfaceTest, PublishAndConsumeThroughAbstractPointer)
+{
+    std::unique_ptr<MessageBroker> broker = std::make_unique<InMemoryMessageBroker>();
+    std::string received;
+
+    broker->subscribe("t", [&](const Message& msg) -> bool {
+        received = msg.payload;
+        return true;
+    });
+    broker->start();
+
+    broker->publish(make_msg("t", "hello"));
+
+    for (int i = 0; i < 100 && received.empty(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    broker->stop();
+
+    EXPECT_EQ(received, "hello");
+}
+
+// ===========================================================================
+// 31. Abstract interface: stats through MessageBroker*
+// ===========================================================================
+
+TEST(MessageBrokerInterfaceTest, StatsThroughAbstractPointer)
+{
+    std::unique_ptr<MessageBroker> broker = std::make_unique<InMemoryMessageBroker>();
+
+    broker->publish(make_msg("t", "m1"));
+    broker->publish(make_msg("t", "m2"));
+
+    auto s = broker->stats();
+    EXPECT_EQ(s.messages_published, 2u);
+    EXPECT_EQ(s.queue_depth, 2u);
+}
+
+// ===========================================================================
+// 32. Abstract interface: dead-letter through MessageBroker*
+// ===========================================================================
+
+TEST(MessageBrokerInterfaceTest, DeadLetterThroughAbstractPointer)
+{
+    BrokerConfig config;
+    config.max_delivery_attempts = 1;
+    std::unique_ptr<MessageBroker> broker =
+        std::make_unique<InMemoryMessageBroker>(config);
+
+    broker->subscribe("t", [](const Message&) -> bool {
+        return false;
+    });
+    broker->start();
+
+    broker->publish(make_msg("t", "fail"));
+
+    for (int i = 0; i < 100; ++i) {
+        auto s = broker->stats();
+        if (s.messages_dead_lettered > 0) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    broker->stop();
+
+    auto dl = broker->dead_letters("t");
+    ASSERT_EQ(dl.size(), 1u);
+    EXPECT_EQ(dl[0].state, DeliveryState::DeadLetter);
+}
+
+// ===========================================================================
+// 33. Abstract interface: publish_with_timeout through MessageBroker*
+// ===========================================================================
+
+TEST(MessageBrokerInterfaceTest, PublishWithTimeoutThroughAbstractPointer)
+{
+    std::unique_ptr<MessageBroker> broker = std::make_unique<InMemoryMessageBroker>();
+    auto result = broker->publish_with_timeout(make_msg("t", "m1"), 100);
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(*result, 0u);
+}
+
+// ===========================================================================
+// 34. Abstract interface: idempotency through MessageBroker*
+// ===========================================================================
+
+TEST(MessageBrokerInterfaceTest, IdempotencyThroughAbstractPointer)
+{
+    BrokerConfig config;
+    config.enable_idempotency = true;
+    std::unique_ptr<MessageBroker> broker =
+        std::make_unique<InMemoryMessageBroker>(config);
+
+    std::atomic<int> calls{0};
+    broker->subscribe("t", [&](const Message&) -> bool {
+        calls.fetch_add(1);
+        return true;
+    });
+    broker->start();
+
+    broker->publish(make_msg("t", "m1"));
+
+    for (int i = 0; i < 100 && calls.load() < 1; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    broker->stop();
+
+    EXPECT_TRUE(broker->was_processed(1));
 }

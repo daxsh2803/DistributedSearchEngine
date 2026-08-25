@@ -1,9 +1,9 @@
-// Distributed Search Engine - In-Memory Message Broker (Phase 18A).
+// Distributed Search Engine - In-Memory Message Broker (Phase 18B).
 //
-// Implementation of the MessageBroker: thread-safe publish/subscribe
+// Implementation of InMemoryMessageBroker: thread-safe publish/subscribe
 // with backpressure, retry, dead-letter, idempotency, and graceful shutdown.
 
-#include "message_broker.h"
+#include "in_memory_message_broker.h"
 
 #include <chrono>
 #include <stdexcept>
@@ -14,10 +14,10 @@ namespace dse {
 // Construction / destruction
 // ---------------------------------------------------------------------------
 
-MessageBroker::MessageBroker(BrokerConfig config)
+InMemoryMessageBroker::InMemoryMessageBroker(BrokerConfig config)
     : config_(std::move(config)) {}
 
-MessageBroker::~MessageBroker() {
+InMemoryMessageBroker::~InMemoryMessageBroker() {
     stop();
 }
 
@@ -25,7 +25,7 @@ MessageBroker::~MessageBroker() {
 // Producer API
 // ---------------------------------------------------------------------------
 
-Offset MessageBroker::publish(Message message) {
+Offset InMemoryMessageBroker::publish(Message message) {
     std::unique_lock lock(mutex_);
 
     // Backpressure: block until the queue has space.
@@ -58,7 +58,7 @@ Offset MessageBroker::publish(Message message) {
     return assigned_offset;
 }
 
-std::optional<Offset> MessageBroker::publish_with_timeout(
+std::optional<Offset> InMemoryMessageBroker::publish_with_timeout(
     Message message, std::size_t timeout_ms) {
     std::unique_lock lock(mutex_);
 
@@ -101,7 +101,7 @@ std::optional<Offset> MessageBroker::publish_with_timeout(
 // Consumer API
 // ---------------------------------------------------------------------------
 
-void MessageBroker::subscribe(const Topic& topic, MessageHandler handler) {
+void InMemoryMessageBroker::subscribe(const Topic& topic, MessageHandler handler) {
     std::lock_guard lock(mutex_);
     if (running_.load(std::memory_order_relaxed)) {
         throw std::logic_error(
@@ -113,7 +113,7 @@ void MessageBroker::subscribe(const Topic& topic, MessageHandler handler) {
     topics_[topic]->handler = std::move(handler);
 }
 
-void MessageBroker::start() {
+void InMemoryMessageBroker::start() {
     if (running_.exchange(true)) return;  // already running
 
     std::lock_guard lock(mutex_);
@@ -121,12 +121,12 @@ void MessageBroker::start() {
         if (!state->handler) continue;  // no handler, skip
         for (std::size_t i = 0; i < config_.consumer_threads; ++i) {
             consumer_threads_.emplace_back(
-                &MessageBroker::consumer_loop, this, std::ref(*state));
+                &InMemoryMessageBroker::consumer_loop, this, std::ref(*state));
         }
     }
 }
 
-void MessageBroker::stop() {
+void InMemoryMessageBroker::stop() {
     if (!running_.exchange(false)) return;  // already stopped
 
     // Wake all threads so they can observe running_ == false.
@@ -147,7 +147,7 @@ void MessageBroker::stop() {
 // Consumer loop
 // ---------------------------------------------------------------------------
 
-void MessageBroker::consumer_loop(TopicState& state) {
+void InMemoryMessageBroker::consumer_loop(TopicState& state) {
     while (true) {
         std::unique_lock lock(mutex_);
 
@@ -157,7 +157,7 @@ void MessageBroker::consumer_loop(TopicState& state) {
                    !running_.load(std::memory_order_relaxed);
         });
 
-        // Shutdown + queue empty → exit.
+        // Shutdown + queue empty -> exit.
         if (!running_.load(std::memory_order_relaxed) && state.pending.empty()) {
             break;
         }
@@ -216,7 +216,7 @@ void MessageBroker::consumer_loop(TopicState& state) {
 // Failure handling
 // ---------------------------------------------------------------------------
 
-void MessageBroker::handle_failure(TopicState& state, Message msg) {
+void InMemoryMessageBroker::handle_failure(TopicState& state, Message msg) {
     // During shutdown, dead-letter immediately to prevent infinite retry loops.
     const bool shutting_down =
         !running_.load(std::memory_order_relaxed);
@@ -240,14 +240,14 @@ void MessageBroker::handle_failure(TopicState& state, Message msg) {
 // Inspection
 // ---------------------------------------------------------------------------
 
-std::size_t MessageBroker::queue_size(const Topic& topic) const {
+std::size_t InMemoryMessageBroker::queue_size(const Topic& topic) const {
     std::lock_guard lock(mutex_);
     auto it = topics_.find(topic);
     if (it == topics_.end()) return 0;
     return it->second->pending.size();
 }
 
-BrokerStats MessageBroker::stats() const {
+BrokerStats InMemoryMessageBroker::stats() const {
     std::lock_guard lock(mutex_);
     BrokerStats s;
     s.messages_published =
@@ -267,7 +267,7 @@ BrokerStats MessageBroker::stats() const {
     return s;
 }
 
-std::vector<Message> MessageBroker::dead_letters(const Topic& topic) const {
+std::vector<Message> InMemoryMessageBroker::dead_letters(const Topic& topic) const {
     std::lock_guard lock(mutex_);
     auto it = topics_.find(topic);
     if (it == topics_.end()) return {};
@@ -279,7 +279,7 @@ std::vector<Message> MessageBroker::dead_letters(const Topic& topic) const {
 // Idempotency
 // ---------------------------------------------------------------------------
 
-bool MessageBroker::was_processed(MessageId id) const {
+bool InMemoryMessageBroker::was_processed(MessageId id) const {
     std::lock_guard lock(mutex_);
     return processed_ids_.count(id) > 0;
 }

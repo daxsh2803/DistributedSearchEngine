@@ -79,7 +79,7 @@ add_library(dse_core STATIC
     src/circuit_breaker.cpp
     src/metrics.cpp
     src/replica_placement.cpp
-    src/message_broker.cpp)
+    src/in_memory_message_broker.cpp)
 target_include_directories(dse_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_options(dse_core PRIVATE ${PROJECT_WARNINGS})
 target_link_libraries(dse_core PUBLIC httplib::httplib nlohmann_json::nlohmann_json)
