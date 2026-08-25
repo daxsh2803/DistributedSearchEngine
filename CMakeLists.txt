@@ -78,7 +78,8 @@ add_library(dse_core STATIC
     src/retry_policy.cpp
     src/circuit_breaker.cpp
     src/metrics.cpp
-    src/replica_placement.cpp)
+    src/replica_placement.cpp
+    src/message_broker.cpp)
 target_include_directories(dse_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_options(dse_core PRIVATE ${PROJECT_WARNINGS})
 target_link_libraries(dse_core PUBLIC httplib::httplib nlohmann_json::nlohmann_json)
@@ -292,4 +293,10 @@ if(BUILD_TESTING)
     gtest_discover_tests(remote_node_metrics_test)
     gtest_discover_tests(coordinator_metrics_test)
     gtest_discover_tests(http_metrics_test)
+
+    add_executable(message_broker_test tests/message_broker_test.cpp)
+    target_compile_options(message_broker_test PRIVATE ${PROJECT_WARNINGS})
+    target_link_libraries(message_broker_test PRIVATE GTest::gtest_main dse_core)
+
+    gtest_discover_tests(message_broker_test)
 endif()
