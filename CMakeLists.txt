@@ -282,6 +282,12 @@ if(BUILD_TESTING)
     target_link_libraries(http_metrics_test PRIVATE GTest::gtest_main dse_core)
 
     gtest_discover_tests(replica_placement_test)
+
+    add_executable(replication_integration_test tests/replication_integration_test.cpp)
+    target_compile_options(replication_integration_test PRIVATE ${PROJECT_WARNINGS})
+    target_link_libraries(replication_integration_test PRIVATE GTest::gtest_main dse_core)
+
+    gtest_discover_tests(replication_integration_test)
     gtest_discover_tests(metrics_test)
     gtest_discover_tests(remote_node_metrics_test)
     gtest_discover_tests(coordinator_metrics_test)

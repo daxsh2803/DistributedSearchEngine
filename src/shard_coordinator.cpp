@@ -654,9 +654,12 @@ std::size_t ShardCoordinator::total_document_count() const
 bool ShardCoordinator::save_all() const
 {
     for (std::size_t sid = 0; sid < router_->shard_count(); ++sid) {
-        NodeClient& nc = node_for_shard(sid);
-        if (!nc.save_shard(sid)) {
-            return false;
+        const auto& replicas = replicas_for_shard(sid);
+        for (std::size_t node_id : replicas) {
+            NodeClient& nc = *nodes_[node_id];
+            if (!nc.save_shard(sid)) {
+                return false;
+            }
         }
     }
     return true;
@@ -665,8 +668,11 @@ bool ShardCoordinator::save_all() const
 bool ShardCoordinator::load_all()
 {
     for (std::size_t sid = 0; sid < router_->shard_count(); ++sid) {
-        NodeClient& nc = node_for_shard(sid);
-        nc.load_shard(sid);  // Ignore per-shard failures.
+        const auto& replicas = replicas_for_shard(sid);
+        for (std::size_t node_id : replicas) {
+            NodeClient& nc = *nodes_[node_id];
+            nc.load_shard(sid);  // Ignore per-shard failures.
+        }
     }
     return true;
 }
