@@ -91,11 +91,25 @@ ShardCoordinator::PostingsResult ShardCoordinator::collect_postings(
     for (std::size_t sid = 0; sid < n; ++sid) {
         futures.push_back(std::async(std::launch::async,
             [this, sid, term]() {
-                NodeClient& nc = node_for_shard(sid);
-                ShardSearchRequest req;
-                req.shard_id = sid;
-                req.terms = {std::string(term)};
-                return nc.search(req);
+                // Try replicas in order: primary first, then fallbacks.
+                const auto& replicas = replicas_for_shard(sid);
+                for (std::size_t node_id : replicas) {
+                    NodeClient& nc = *nodes_[node_id];
+                    ShardSearchRequest req;
+                    req.shard_id = sid;
+                    req.terms = {std::string(term)};
+                    auto resp = nc.search(req);
+                    if (!resp.is_error) {
+                        return resp;  // Success — use this replica.
+                    }
+                    // Primary/replica failed — try next.
+                }
+                // All replicas failed — return error.
+                ShardSearchResponse fail_resp;
+                fail_resp.shard_id = sid;
+                fail_resp.is_error = true;
+                fail_resp.error_message = "all replicas failed for shard " + std::to_string(sid);
+                return fail_resp;
             }));
     }
 
@@ -127,20 +141,28 @@ ShardCoordinator::GlobalNResult ShardCoordinator::compute_global_n() const
 {
     GlobalNResult result;
     for (std::size_t sid = 0; sid < router_->shard_count(); ++sid) {
-        NodeClient& nc = node_for_shard(sid);
-        ShardCountRequest req;
-        req.shard_id = sid;
-        auto resp = nc.document_count(req);
-        if (resp.is_error) {
+        // Try replicas in order for document count.
+        bool shard_ok = false;
+        const auto& replicas = replicas_for_shard(sid);
+        for (std::size_t node_id : replicas) {
+            NodeClient& nc = *nodes_[node_id];
+            ShardCountRequest req;
+            req.shard_id = sid;
+            auto resp = nc.document_count(req);
+            if (!resp.is_error) {
+                result.total += resp.document_count;
+                shard_ok = true;
+                break;
+            }
+        }
+        if (!shard_ok) {
             result.complete = false;
             NodeFailureInfo fail;
             fail.shard_id = sid;
-            fail.node_id = nc.node_id();
+            fail.node_id = node_for_shard(sid).node_id();
             fail.category = "count_failure";
-            fail.message = resp.error_message;
+            fail.message = "all replicas failed for shard " + std::to_string(sid);
             result.failures.push_back(std::move(fail));
-        } else {
-            result.total += resp.document_count;
         }
     }
     return result;
@@ -593,19 +615,31 @@ CoordinatorDeleteResponse ShardCoordinator::remove(doc_id id)
 std::optional<Document> ShardCoordinator::get_document(doc_id id) const
 {
     const std::size_t shard_id = router_->route(id);
-    NodeClient& nc = node_for_shard(shard_id);
 
-    ShardGetRequest req;
-    req.shard_id = shard_id;
-    req.document_id = id;
+    // Try replicas in order: primary first, then fallbacks.
+    const auto& replicas = replicas_for_shard(shard_id);
+    for (std::size_t node_id : replicas) {
+        NodeClient& nc = *nodes_[node_id];
+        ShardGetRequest req;
+        req.shard_id = shard_id;
+        req.document_id = id;
 
-    auto resp = nc.get_document(req);
+        auto resp = nc.get_document(req);
 
-    if (!resp.found) {
+        if (resp.is_error) {
+            // Actual failure — try next replica.
+            continue;
+        }
+
+        // Successful operation — return the result (found or not-found).
+        if (resp.found) {
+            return Document{id, resp.content};
+        }
+        // Document genuinely not found — don't try other replicas.
         return std::nullopt;
     }
 
-    return Document{id, resp.content};
+    return std::nullopt;
 }
 
 std::size_t ShardCoordinator::total_document_count() const

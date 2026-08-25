@@ -92,6 +92,8 @@ struct ShardGetResponse {
     doc_id document_id;
     std::string content;
     bool found = false;
+    bool is_error = false;
+    std::string error_message;
 };
 
 struct ShardCountRequest {

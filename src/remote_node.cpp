@@ -468,9 +468,9 @@ ShardGetResponse RemoteNode::get_document(const ShardGetRequest& request)
 
     // Check circuit breaker before attempting request.
     if (!circuit_breaker_->should_allow_request()) {
-        response.found = false;
-        // get_document doesn't have is_error; treat circuit-open as not found.
-        // Metrics: record as a write with success=false (no dedicated get metric).
+        response.is_error = true;
+        response.error_message = "Circuit breaker OPEN: node " +
+            std::to_string(node_id_) + " is unavailable";
         if (metrics_) {
             metrics_->record_write("get", node_id_,
                                    elapsed_ms(start_time), false);
@@ -497,7 +497,9 @@ ShardGetResponse RemoteNode::get_document(const ShardGetRequest& request)
             auto res = client->Post("/node/get", body, "application/json");
 
             if (!res) {
-                response.found = false;
+                response.is_error = true;
+                response.error_message =
+                    "Connection failed to node " + std::to_string(node_id_);
                 // Network failure — retry if allowed.
                 if (attempt + 1 < retry_policy_.max_attempts) {
                     continue;
@@ -520,7 +522,8 @@ ShardGetResponse RemoteNode::get_document(const ShardGetRequest& request)
             observe_circuit_breaker();
             return shard_get_response_from_json(j);
         } catch (...) {
-            response.found = false;
+            response.is_error = true;
+            response.error_message = "Unknown error communicating with node";
             if (attempt + 1 < retry_policy_.max_attempts) {
                 continue;
             }

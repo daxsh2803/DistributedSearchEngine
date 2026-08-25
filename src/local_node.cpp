@@ -200,6 +200,10 @@ ShardGetResponse LocalNode::get_document(const ShardGetRequest& request)
 
     Shard* shard = find_shard(request.shard_id);
     if (!shard) {
+        response.is_error = true;
+        response.error_message =
+            "Shard " + std::to_string(request.shard_id) +
+            " not found on node " + std::to_string(node_id_);
         return response;
     }
 

@@ -288,6 +288,8 @@ TEST(NodeWireTest, GetResponseFound)
     EXPECT_EQ(result.document_id, 10u);
     EXPECT_EQ(result.content, "the quick brown fox");
     EXPECT_TRUE(result.found);
+    EXPECT_FALSE(result.is_error);
+    EXPECT_TRUE(result.error_message.empty());
 }
 
 TEST(NodeWireTest, GetResponseNotFound)
@@ -303,6 +305,23 @@ TEST(NodeWireTest, GetResponseNotFound)
 
     EXPECT_FALSE(result.found);
     EXPECT_TRUE(result.content.empty());
+    EXPECT_FALSE(result.is_error);
+}
+
+TEST(NodeWireTest, GetResponseError)
+{
+    ShardGetResponse resp;
+    resp.shard_id = 0;
+    resp.document_id = 5;
+    resp.is_error = true;
+    resp.error_message = "node unavailable";
+
+    auto j = to_json(resp);
+    auto result = shard_get_response_from_json(j);
+
+    EXPECT_TRUE(result.is_error);
+    EXPECT_EQ(result.error_message, "node unavailable");
+    EXPECT_FALSE(result.found);
 }
 
 // ===========================================================================

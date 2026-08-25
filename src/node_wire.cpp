@@ -169,6 +169,8 @@ nlohmann::json to_json(const ShardGetResponse& resp)
     j["document_id"] = resp.document_id;
     j["content"] = resp.content;
     j["found"] = resp.found;
+    j["is_error"] = resp.is_error;
+    j["error_message"] = resp.error_message;
     return j;
 }
 
@@ -245,6 +247,8 @@ ShardGetResponse shard_get_response_from_json(const nlohmann::json& j)
     resp.document_id = j.at("document_id").get<doc_id>();
     resp.content = j.at("content").get<std::string>();
     resp.found = j.at("found").get<bool>();
+    resp.is_error = j.value("is_error", false);
+    resp.error_message = j.value("error_message", "");
     return resp;
 }
 
