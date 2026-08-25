@@ -22,6 +22,7 @@
 #include "metrics.h"
 #include "node_client.h"
 #include "node_config.h"
+#include "replica_placement.h"
 #include "search_service.h"
 #include "shard_router.h"
 #include "tokenizer.h"
@@ -30,12 +31,31 @@ namespace dse {
 
 ShardCoordinator::ShardCoordinator(
     std::unique_ptr<ShardRouter> router,
-    std::unique_ptr<ShardPlacement> placement,
+    std::unique_ptr<ShardReplicaPlacement> placement,
     std::vector<std::unique_ptr<NodeClient>> nodes)
     : router_(std::move(router))
     , placement_(std::move(placement))
     , nodes_(std::move(nodes))
 {
+}
+
+ShardCoordinator::ShardCoordinator(
+    std::unique_ptr<ShardRouter> router,
+    std::unique_ptr<ShardPlacement> placement,
+    std::vector<std::unique_ptr<NodeClient>> nodes)
+    : router_(std::move(router))
+    , nodes_(std::move(nodes))
+{
+    // Convert legacy single-replica placement to ShardReplicaPlacement.
+    const std::size_t shard_count = router_->shard_count();
+    const std::size_t node_count = nodes_.size();
+    std::vector<ShardReplicaSet> replica_sets;
+    replica_sets.reserve(shard_count);
+    for (std::size_t sid = 0; sid < shard_count; ++sid) {
+        replica_sets.push_back({sid, {placement->node_of(sid)}});
+    }
+    placement_ = std::make_unique<ShardReplicaPlacement>(
+        shard_count, node_count, 1, replica_sets);
 }
 
 void ShardCoordinator::set_metrics(MetricsCollector* metrics)
@@ -49,8 +69,14 @@ void ShardCoordinator::set_metrics(MetricsCollector* metrics)
 
 NodeClient& ShardCoordinator::node_for_shard(std::size_t shard_id) const
 {
-    const std::size_t node_id = placement_->node_of(shard_id);
+    const std::size_t node_id = placement_->primary_of(shard_id);
     return *nodes_[node_id];
+}
+
+const std::vector<std::size_t>& ShardCoordinator::replicas_for_shard(
+    std::size_t shard_id) const
+{
+    return placement_->replicas_of(shard_id);
 }
 
 ShardCoordinator::PostingsResult ShardCoordinator::collect_postings(
@@ -81,7 +107,7 @@ ShardCoordinator::PostingsResult ShardCoordinator::collect_postings(
             if (resp.is_error) {
                 NodeFailureInfo fail;
                 fail.shard_id = resp.shard_id;
-                fail.node_id = placement_->node_of(resp.shard_id);
+                fail.node_id = node_for_shard(resp.shard_id).node_id();
                 fail.category = "search_failure";
                 fail.message = resp.error_message;
                 result.failures.push_back(std::move(fail));
@@ -109,7 +135,7 @@ ShardCoordinator::GlobalNResult ShardCoordinator::compute_global_n() const
             result.complete = false;
             NodeFailureInfo fail;
             fail.shard_id = sid;
-            fail.node_id = placement_->node_of(sid);
+            fail.node_id = nc.node_id();
             fail.category = "count_failure";
             fail.message = resp.error_message;
             result.failures.push_back(std::move(fail));
@@ -383,33 +409,47 @@ CoordinatorIngestResponse ShardCoordinator::ingest(
     }
 
     const std::size_t shard_id = router_->route(request.id);
-    NodeClient& nc = node_for_shard(shard_id);
+    const auto& replicas = replicas_for_shard(shard_id);
 
-    ShardWriteRequest req;
-    req.shard_id = shard_id;
-    req.document_id = request.id;
-    req.content = request.content;
+    // Fan out write to ALL replicas in parallel.
+    std::vector<std::future<ShardWriteResponse>> futures;
+    futures.reserve(replicas.size());
 
-    auto resp = nc.add_document(req);
-
-    if (resp.is_error) {
-        response.is_error = true;
-        response.error_message = std::move(resp.error_message);
-        if (metrics_) {
-            const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
-                std::chrono::steady_clock::now() - start_time).count();
-            metrics_->record_coordinator_write(
-                static_cast<double>(elapsed) / 1000.0, false);
-        }
-        return response;
+    for (std::size_t node_id : replicas) {
+        futures.push_back(std::async(std::launch::async,
+            [this, shard_id, node_id, &request]() {
+                NodeClient& nc = *nodes_[node_id];
+                ShardWriteRequest req;
+                req.shard_id = shard_id;
+                req.document_id = request.id;
+                req.content = request.content;
+                return nc.add_document(req);
+            }));
     }
 
-    response.terms_indexed = resp.terms_indexed;
+    // Collect results: all replicas must succeed.
+    bool all_succeeded = true;
+    for (auto& f : futures) {
+        auto resp = f.get();
+        if (resp.is_error) {
+            all_succeeded = false;
+            if (response.error_message.empty()) {
+                response.error_message = std::move(resp.error_message);
+            }
+        } else if (all_succeeded) {
+            response.terms_indexed = resp.terms_indexed;
+        }
+    }
+
+    if (!all_succeeded) {
+        response.is_error = true;
+    }
+
     if (metrics_) {
         const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - start_time).count();
         metrics_->record_coordinator_write(
-            static_cast<double>(elapsed) / 1000.0, true);
+            static_cast<double>(elapsed) / 1000.0, !response.is_error);
     }
     return response;
 }
@@ -453,33 +493,47 @@ CoordinatorUpdateResponse ShardCoordinator::update(
     }
 
     const std::size_t shard_id = router_->route(request.id);
-    NodeClient& nc = node_for_shard(shard_id);
+    const auto& replicas = replicas_for_shard(shard_id);
 
-    ShardWriteRequest req;
-    req.shard_id = shard_id;
-    req.document_id = request.id;
-    req.content = request.content;
+    // Fan out write to ALL replicas in parallel.
+    std::vector<std::future<ShardWriteResponse>> futures;
+    futures.reserve(replicas.size());
 
-    auto resp = nc.update_document(req);
-
-    if (resp.is_error) {
-        response.is_error = true;
-        response.error_message = std::move(resp.error_message);
-        if (metrics_) {
-            const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
-                std::chrono::steady_clock::now() - start_time).count();
-            metrics_->record_coordinator_write(
-                static_cast<double>(elapsed) / 1000.0, false);
-        }
-        return response;
+    for (std::size_t node_id : replicas) {
+        futures.push_back(std::async(std::launch::async,
+            [this, shard_id, node_id, &request]() {
+                NodeClient& nc = *nodes_[node_id];
+                ShardWriteRequest req;
+                req.shard_id = shard_id;
+                req.document_id = request.id;
+                req.content = request.content;
+                return nc.update_document(req);
+            }));
     }
 
-    response.terms_indexed = resp.terms_indexed;
+    // Collect results: all replicas must succeed.
+    bool all_succeeded = true;
+    for (auto& f : futures) {
+        auto resp = f.get();
+        if (resp.is_error) {
+            all_succeeded = false;
+            if (response.error_message.empty()) {
+                response.error_message = std::move(resp.error_message);
+            }
+        } else if (all_succeeded) {
+            response.terms_indexed = resp.terms_indexed;
+        }
+    }
+
+    if (!all_succeeded) {
+        response.is_error = true;
+    }
+
     if (metrics_) {
         const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - start_time).count();
         metrics_->record_coordinator_write(
-            static_cast<double>(elapsed) / 1000.0, true);
+            static_cast<double>(elapsed) / 1000.0, !response.is_error);
     }
     return response;
 }
@@ -490,31 +544,44 @@ CoordinatorDeleteResponse ShardCoordinator::remove(doc_id id)
     CoordinatorDeleteResponse response;
 
     const std::size_t shard_id = router_->route(id);
-    NodeClient& nc = node_for_shard(shard_id);
+    const auto& replicas = replicas_for_shard(shard_id);
 
-    ShardRemoveRequest req;
-    req.shard_id = shard_id;
-    req.document_id = id;
+    // Fan out delete to ALL replicas in parallel.
+    std::vector<std::future<ShardRemoveResponse>> futures;
+    futures.reserve(replicas.size());
 
-    auto resp = nc.remove_document(req);
+    for (std::size_t node_id : replicas) {
+        futures.push_back(std::async(std::launch::async,
+            [this, shard_id, node_id, id]() {
+                NodeClient& nc = *nodes_[node_id];
+                ShardRemoveRequest req;
+                req.shard_id = shard_id;
+                req.document_id = id;
+                return nc.remove_document(req);
+            }));
+    }
 
-    if (resp.is_error) {
-        response.is_error = true;
-        response.error_message = std::move(resp.error_message);
-        if (metrics_) {
-            const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
-                std::chrono::steady_clock::now() - start_time).count();
-            metrics_->record_coordinator_write(
-                static_cast<double>(elapsed) / 1000.0, false);
+    // Collect results: all replicas must succeed.
+    bool all_succeeded = true;
+    for (auto& f : futures) {
+        auto resp = f.get();
+        if (resp.is_error) {
+            all_succeeded = false;
+            if (response.error_message.empty()) {
+                response.error_message = std::move(resp.error_message);
+            }
         }
-        return response;
+    }
+
+    if (!all_succeeded) {
+        response.is_error = true;
     }
 
     if (metrics_) {
         const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - start_time).count();
         metrics_->record_coordinator_write(
-            static_cast<double>(elapsed) / 1000.0, true);
+            static_cast<double>(elapsed) / 1000.0, !response.is_error);
     }
     return response;
 }

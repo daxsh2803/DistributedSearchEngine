@@ -35,6 +35,7 @@
 #include "metrics.h"
 #include "node_client.h"
 #include "node_config.h"
+#include "replica_placement.h"
 #include "search_service.h"   // for SearchRequest, SearchResponse
 #include "shard_router.h"
 
@@ -72,11 +73,17 @@ struct CoordinatorDeleteResponse {
 
 class ShardCoordinator {
 public:
-    // Construct a coordinator with routing, placement, and nodes.
+    // Construct a coordinator with routing, replica placement, and nodes.
     // The coordinator takes ownership of all provided objects.
     //
     // nodes must be indexed by node_id and contain at least
     // placement.node_count() entries.
+    ShardCoordinator(std::unique_ptr<ShardRouter> router,
+                     std::unique_ptr<ShardReplicaPlacement> placement,
+                     std::vector<std::unique_ptr<NodeClient>> nodes);
+
+    // Convenience constructor: legacy single-replica placement.
+    // Converts ShardPlacement (shard→single node) to R=1 ShardReplicaPlacement.
     ShardCoordinator(std::unique_ptr<ShardRouter> router,
                      std::unique_ptr<ShardPlacement> placement,
                      std::vector<std::unique_ptr<NodeClient>> nodes);
@@ -113,8 +120,11 @@ public:
     const NodeClient& node(std::size_t index) const;
 
 private:
-    // Find the NodeClient that owns a given shard.
+    // Find the NodeClient that owns a given shard (primary).
     NodeClient& node_for_shard(std::size_t shard_id) const;
+
+    // Get all replicas for a shard.
+    const std::vector<std::size_t>& replicas_for_shard(std::size_t shard_id) const;
 
     // Collect postings for a term across all shards, recording failures.
     struct PostingsResult {
@@ -132,7 +142,7 @@ private:
     GlobalNResult compute_global_n() const;
 
     std::unique_ptr<ShardRouter> router_;
-    std::unique_ptr<ShardPlacement> placement_;
+    std::unique_ptr<ShardReplicaPlacement> placement_;
     std::vector<std::unique_ptr<NodeClient>> nodes_;
     MetricsCollector* metrics_ = nullptr;  // optional, not owned
 };
