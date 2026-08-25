@@ -77,7 +77,8 @@ add_library(dse_core STATIC
     src/remote_node.cpp
     src/retry_policy.cpp
     src/circuit_breaker.cpp
-    src/metrics.cpp)
+    src/metrics.cpp
+    src/replica_placement.cpp)
 target_include_directories(dse_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_options(dse_core PRIVATE ${PROJECT_WARNINGS})
 target_link_libraries(dse_core PUBLIC httplib::httplib nlohmann_json::nlohmann_json)
@@ -250,6 +251,10 @@ if(BUILD_TESTING)
     gtest_discover_tests(circuit_breaker_test)
     gtest_discover_tests(remote_circuit_breaker_test)
 
+    add_executable(replica_placement_test tests/replica_placement_test.cpp)
+    target_compile_options(replica_placement_test PRIVATE ${PROJECT_WARNINGS})
+    target_link_libraries(replica_placement_test PRIVATE GTest::gtest_main dse_core)
+
     add_executable(metrics_test tests/metrics_test.cpp)
     target_compile_options(metrics_test PRIVATE ${PROJECT_WARNINGS})
     target_link_libraries(metrics_test PRIVATE GTest::gtest_main dse_core)
@@ -266,6 +271,7 @@ if(BUILD_TESTING)
     target_compile_options(http_metrics_test PRIVATE ${PROJECT_WARNINGS})
     target_link_libraries(http_metrics_test PRIVATE GTest::gtest_main dse_core)
 
+    gtest_discover_tests(replica_placement_test)
     gtest_discover_tests(metrics_test)
     gtest_discover_tests(remote_node_metrics_test)
     gtest_discover_tests(coordinator_metrics_test)
