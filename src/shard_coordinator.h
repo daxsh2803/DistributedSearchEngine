@@ -32,6 +32,7 @@
 
 #include "document_store.h"  // for Document
 #include "event_dispatcher.h"
+#include "event_store.h"
 #include "inverted_index.h"   // for doc_id, Posting
 #include "metrics.h"
 #include "node_client.h"
@@ -100,6 +101,12 @@ public:
     // regardless of replication factor.
     void set_event_dispatcher(EventDispatcher* dispatcher);
 
+    // Set an optional event store for reliable delivery tracking.
+    // Pass nullptr to disable event tracking (default).
+    // When set, successful document mutations create a tracked event
+    // with a stable event_id before enqueueing for dispatch.
+    void set_event_store(EventStore* store);
+
     // --- Search ---
     // Cross-shard search with global TF-IDF scoring.
     // Issues parallel fan-out to all nodes via std::async.
@@ -152,8 +159,9 @@ private:
     std::unique_ptr<ShardRouter> router_;
     std::unique_ptr<ShardReplicaPlacement> placement_;
     std::vector<std::unique_ptr<NodeClient>> nodes_;
-    MetricsCollector* metrics_ = nullptr;  // optional, not owned
-    EventDispatcher* dispatcher_ = nullptr; // optional, not owned
+    MetricsCollector* metrics_ = nullptr;   // optional, not owned
+    EventDispatcher* dispatcher_ = nullptr;  // optional, not owned
+    EventStore* event_store_ = nullptr;      // optional, not owned
 };
 
 } // namespace dse

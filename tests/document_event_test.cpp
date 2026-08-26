@@ -1,14 +1,15 @@
-// Distributed Search Engine - Document Event Tests (Phase 18C/18D).
+// Distributed Search Engine - Document Event Tests (Phase 18C/18D/18E).
 //
 // Tests for domain event publication after successful document mutations.
 // Verifies that:
 //   - Successful mutations publish exactly one event per logical operation
 //   - Failed mutations publish no events
-//   - Event payloads are correct JSON
+//   - Event payloads are correct JSON (including event_id)
 //   - No double-counting with replication factor R=2
 //   - No dispatcher = no events (backward compatibility)
 //   - Event topics are correct
 //   - Asynchronous dispatch works correctly
+//   - EventStore integration tracks event lifecycle
 
 #include "shard_coordinator.h"
 
@@ -23,6 +24,7 @@
 
 #include "document_event.h"
 #include "event_dispatcher.h"
+#include "event_store.h"
 #include "in_memory_message_broker.h"
 #include "inverted_index.h"
 #include "local_node.h"
@@ -40,9 +42,11 @@ namespace {
 // Test helpers
 // ---------------------------------------------------------------------------
 
-// Create a coordinator with N shards, 1 node, and an optional dispatcher.
+// Create a coordinator with N shards, 1 node, and optional dispatcher/store.
 std::unique_ptr<ShardCoordinator> make_coord(
-    std::size_t n, EventDispatcher* dispatcher = nullptr)
+    std::size_t n,
+    EventDispatcher* dispatcher = nullptr,
+    EventStore* store = nullptr)
 {
     auto router = std::make_unique<ShardRouter>(n);
     std::vector<std::size_t> placement(n, 0);
@@ -59,12 +63,15 @@ std::unique_ptr<ShardCoordinator> make_coord(
     auto coord = std::make_unique<ShardCoordinator>(
         std::move(router), std::move(rp), std::move(nodes));
     coord->set_event_dispatcher(dispatcher);
+    if (store) coord->set_event_store(store);
     return coord;
 }
 
-// Create a coordinator with R=2 replication and an optional dispatcher.
+// Create a coordinator with R=2 replication.
 std::unique_ptr<ShardCoordinator> make_coord_r2(
-    std::size_t n, EventDispatcher* dispatcher = nullptr)
+    std::size_t n,
+    EventDispatcher* dispatcher = nullptr,
+    EventStore* store = nullptr)
 {
     auto router = std::make_unique<ShardRouter>(n);
     std::vector<ShardReplicaSet> replica_sets;
@@ -88,6 +95,7 @@ std::unique_ptr<ShardCoordinator> make_coord_r2(
     auto coord = std::make_unique<ShardCoordinator>(
         std::move(router), std::move(rp), std::move(nodes));
     coord->set_event_dispatcher(dispatcher);
+    if (store) coord->set_event_store(store);
     return coord;
 }
 
@@ -97,35 +105,38 @@ std::unique_ptr<ShardCoordinator> make_coord_r2(
 
 TEST(DocumentEventTest, IndexedEventSerialization)
 {
-    DocumentIndexedEvent event{42, 3};
+    DocumentIndexedEvent event{42, 3, 0};
     const std::string json = event_json::to_json(event);
 
     auto j = nlohmann::json::parse(json);
+    EXPECT_EQ(j["event_id"], 42u);
     EXPECT_EQ(j["event_type"], "document_indexed");
-    EXPECT_EQ(j["document_id"], 42u);
-    EXPECT_EQ(j["shard_id"], 3u);
+    EXPECT_EQ(j["document_id"], 3u);
+    EXPECT_EQ(j["shard_id"], 0u);
 }
 
 TEST(DocumentEventTest, UpdatedEventSerialization)
 {
-    DocumentUpdatedEvent event{7, 1};
+    DocumentUpdatedEvent event{7, 1, 2};
     const std::string json = event_json::to_json(event);
 
     auto j = nlohmann::json::parse(json);
+    EXPECT_EQ(j["event_id"], 7u);
     EXPECT_EQ(j["event_type"], "document_updated");
-    EXPECT_EQ(j["document_id"], 7u);
-    EXPECT_EQ(j["shard_id"], 1u);
+    EXPECT_EQ(j["document_id"], 1u);
+    EXPECT_EQ(j["shard_id"], 2u);
 }
 
 TEST(DocumentEventTest, RemovedEventSerialization)
 {
-    DocumentRemovedEvent event{99, 0};
+    DocumentRemovedEvent event{99, 5, 1};
     const std::string json = event_json::to_json(event);
 
     auto j = nlohmann::json::parse(json);
+    EXPECT_EQ(j["event_id"], 99u);
     EXPECT_EQ(j["event_type"], "document_removed");
-    EXPECT_EQ(j["document_id"], 99u);
-    EXPECT_EQ(j["shard_id"], 0u);
+    EXPECT_EQ(j["document_id"], 5u);
+    EXPECT_EQ(j["shard_id"], 1u);
 }
 
 TEST(DocumentEventTest, TopicNamesAreCorrect)
@@ -454,6 +465,148 @@ TEST(DocumentEventTest, IngestUpdateRemoveAllProduceEvents)
     EXPECT_EQ(indexed.load(), 1);
     EXPECT_EQ(updated.load(), 1);
     EXPECT_EQ(removed.load(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 18E: EventStore integration
+// ---------------------------------------------------------------------------
+
+TEST(DocumentEventTest, EventStoreTracksIngestEvent)
+{
+    auto store = create_in_memory_event_store();
+    InMemoryMessageBroker broker;
+    broker.subscribe(topics::kDocumentIndexed, [](const Message&) {
+        return true;
+    });
+    broker.start();
+
+    EventDispatcher dispatcher(broker, *store);
+    dispatcher.start();
+
+    auto coord = make_coord(3, &dispatcher, store.get());
+    const auto resp = coord->ingest({42, "hello world"});
+    ASSERT_FALSE(resp.is_error);
+
+    dispatcher.stop();
+    broker.stop();
+
+    auto stats = store->stats();
+    EXPECT_EQ(stats.total, 1u);
+    EXPECT_EQ(stats.published, 1u);
+    EXPECT_EQ(stats.pending, 0u);
+    EXPECT_EQ(stats.dispatching, 0u);
+    EXPECT_EQ(stats.failed, 0u);
+}
+
+TEST(DocumentEventTest, EventStoreTracksEventId)
+{
+    auto store = create_in_memory_event_store();
+    InMemoryMessageBroker broker;
+
+    std::atomic<doc_id> received_doc{0};
+    std::atomic<EventId> received_event_id{0};
+
+    broker.subscribe(topics::kDocumentUpdated, [&](const Message& msg) {
+        auto j = nlohmann::json::parse(msg.payload);
+        received_doc = j["document_id"].get<doc_id>();
+        received_event_id = j["event_id"].get<EventId>();
+        return true;
+    });
+    broker.start();
+
+    EventDispatcher dispatcher(broker, *store);
+    dispatcher.start();
+
+    auto coord = make_coord(3, &dispatcher, store.get());
+    coord->ingest({99, "original"});
+    const auto resp = coord->update({99, "updated"});
+    ASSERT_FALSE(resp.is_error);
+
+    dispatcher.stop();
+    broker.stop();
+
+    EXPECT_GT(received_event_id.load(), 0u);
+    EXPECT_EQ(received_doc.load(), 99u);
+
+    const auto* stored = store->get(received_event_id.load());
+    ASSERT_NE(stored, nullptr);
+    EXPECT_EQ(stored->status, EventStatus::PUBLISHED);
+    EXPECT_EQ(stored->topic, topics::kDocumentUpdated);
+    EXPECT_GE(stored->attempt_count, 1u);
+}
+
+TEST(DocumentEventTest, FailedOperationCreatesNoTrackedEvent)
+{
+    auto store = create_in_memory_event_store();
+    InMemoryMessageBroker broker;
+    broker.subscribe(topics::kDocumentIndexed, [](const Message&) {
+        return true;
+    });
+    broker.start();
+
+    EventDispatcher dispatcher(broker, *store);
+    dispatcher.start();
+
+    auto coord = make_coord(3, &dispatcher, store.get());
+    const auto resp = coord->ingest({1, ""});  // Fail: empty content
+    ASSERT_TRUE(resp.is_error);
+
+    dispatcher.stop();
+    broker.stop();
+
+    auto stats = store->stats();
+    EXPECT_EQ(stats.total, 0u);
+}
+
+TEST(DocumentEventTest, R2WithEventStoreProducesOneTrackedEvent)
+{
+    auto store = create_in_memory_event_store();
+    InMemoryMessageBroker broker;
+    std::atomic<int> event_count{0};
+    broker.subscribe(topics::kDocumentIndexed, [&](const Message&) {
+        ++event_count;
+        return true;
+    });
+    broker.start();
+
+    EventDispatcher dispatcher(broker, *store);
+    dispatcher.start();
+
+    auto coord = make_coord_r2(2, &dispatcher, store.get());
+    const auto resp = coord->ingest({1, "replicated"});
+    ASSERT_FALSE(resp.is_error);
+
+    dispatcher.stop();
+    broker.stop();
+
+    EXPECT_EQ(event_count.load(), 1);
+
+    auto stats = store->stats();
+    EXPECT_EQ(stats.total, 1u);
+    EXPECT_EQ(stats.published, 1u);
+}
+
+TEST(DocumentEventTest, NoStoreBackwardCompatible)
+{
+    InMemoryMessageBroker broker;
+    std::atomic<int> event_count{0};
+    broker.subscribe(topics::kDocumentIndexed, [&](const Message&) {
+        ++event_count;
+        return true;
+    });
+    broker.start();
+
+    EventDispatcher dispatcher(broker);
+    dispatcher.start();
+
+    auto coord = make_coord(3, &dispatcher, nullptr);
+    const auto resp = coord->ingest({1, "no store"});
+    ASSERT_FALSE(resp.is_error);
+
+    dispatcher.stop();
+    broker.stop();
+
+    EXPECT_EQ(event_count.load(), 1);
 }
 
 } // namespace

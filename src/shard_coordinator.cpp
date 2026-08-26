@@ -71,6 +71,11 @@ void ShardCoordinator::set_event_dispatcher(EventDispatcher* dispatcher)
     dispatcher_ = dispatcher;
 }
 
+void ShardCoordinator::set_event_store(EventStore* store)
+{
+    event_store_ = store;
+}
+
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
@@ -485,9 +490,20 @@ CoordinatorIngestResponse ShardCoordinator::ingest(
     // Publish domain event on success (one event per logical operation).
     if (!response.is_error && dispatcher_) {
         const std::size_t shard_id = router_->route(request.id);
-        dispatcher_->enqueue(
-            topics::kDocumentIndexed,
-            event_json::to_json(DocumentIndexedEvent{request.id, shard_id}));
+        DocumentIndexedEvent idx_event{0, request.id, shard_id};
+        if (event_store_) {
+            // Create event in store to get stable ID.
+            idx_event.event_id = event_store_->create_event(
+                topics::kDocumentIndexed, "");
+            // Serialize with the real event_id.
+            const std::string payload = event_json::to_json(idx_event);
+            dispatcher_->enqueue_with_event(
+                idx_event.event_id, topics::kDocumentIndexed, payload);
+        } else {
+            dispatcher_->enqueue(
+                topics::kDocumentIndexed,
+                event_json::to_json(idx_event));
+        }
     }
 
     return response;
@@ -578,9 +594,18 @@ CoordinatorUpdateResponse ShardCoordinator::update(
     // Publish domain event on success (one event per logical operation).
     if (!response.is_error && dispatcher_) {
         const std::size_t shard_id = router_->route(request.id);
-        dispatcher_->enqueue(
-            topics::kDocumentUpdated,
-            event_json::to_json(DocumentUpdatedEvent{request.id, shard_id}));
+        DocumentUpdatedEvent upd_event{0, request.id, shard_id};
+        if (event_store_) {
+            upd_event.event_id = event_store_->create_event(
+                topics::kDocumentUpdated, "");
+            const std::string payload = event_json::to_json(upd_event);
+            dispatcher_->enqueue_with_event(
+                upd_event.event_id, topics::kDocumentUpdated, payload);
+        } else {
+            dispatcher_->enqueue(
+                topics::kDocumentUpdated,
+                event_json::to_json(upd_event));
+        }
     }
 
     return response;
@@ -635,9 +660,18 @@ CoordinatorDeleteResponse ShardCoordinator::remove(doc_id id)
     // Publish domain event on success (one event per logical operation).
     if (!response.is_error && dispatcher_) {
         const std::size_t shard_id = router_->route(id);
-        dispatcher_->enqueue(
-            topics::kDocumentRemoved,
-            event_json::to_json(DocumentRemovedEvent{id, shard_id}));
+        DocumentRemovedEvent rm_event{0, id, shard_id};
+        if (event_store_) {
+            rm_event.event_id = event_store_->create_event(
+                topics::kDocumentRemoved, "");
+            const std::string payload = event_json::to_json(rm_event);
+            dispatcher_->enqueue_with_event(
+                rm_event.event_id, topics::kDocumentRemoved, payload);
+        } else {
+            dispatcher_->enqueue(
+                topics::kDocumentRemoved,
+                event_json::to_json(rm_event));
+        }
     }
 
     return response;

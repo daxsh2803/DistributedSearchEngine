@@ -1,4 +1,4 @@
-// Distributed Search Engine - Event Dispatcher Tests (Phase 18D).
+// Distributed Search Engine - Event Dispatcher Tests (Phase 18D/18E).
 //
 // Tests for the bounded asynchronous EventDispatcher layer between
 // ShardCoordinator and MessageBroker.
@@ -11,6 +11,8 @@
 //   - Shutdown semantics
 //   - Coordinator integration
 //   - Concurrency safety
+//   - EventStore integration (Phase 18E)
+//   - Retry and replay semantics (Phase 18E)
 
 #include "event_dispatcher.h"
 
@@ -27,6 +29,8 @@
 #include <vector>
 
 #include "document_event.h"
+#include "event_store.h"
+#include <nlohmann/json.hpp>
 #include "in_memory_message_broker.h"
 #include "inverted_index.h"
 #include "local_node.h"
@@ -310,7 +314,9 @@ TEST(EventDispatcherTest, BrokerFailureDoesNotCrashDispatcher)
 {
     FailingMessageBroker broker(true);  // Will throw on publish.
 
-    EventDispatcher dispatcher(broker);
+    EventDispatcher::Config cfg;
+    cfg.max_retries = 0;  // Fail immediately (test purpose: crash resilience).
+    EventDispatcher dispatcher(broker, cfg);
     dispatcher.start();
 
     // Enqueue should succeed even though broker will fail.
@@ -661,6 +667,318 @@ TEST(EventDispatcherTest, StatsTrackEnqueuedAndPublished)
     EXPECT_EQ(s.published, 5u);
     EXPECT_EQ(s.broker_errors, 0u);
     EXPECT_EQ(s.pending, 0u);
+}
+
+// =========================================================================
+// 9. Phase 18E: EventStore integration + retry + replay
+// =========================================================================
+
+TEST(EventDispatcherTest, EnqueueWithEventTracksLifecycle)
+{
+    auto store = create_in_memory_event_store();
+    FailingMessageBroker broker(false);
+
+    EventDispatcher dispatcher(broker, *store);
+    dispatcher.start();
+
+    auto id1 = store->create_event("test.topic", "payload1");
+    auto id2 = store->create_event("test.topic", "payload2");
+
+    EXPECT_TRUE(dispatcher.enqueue_with_event(id1, "test.topic", "payload1"));
+    EXPECT_TRUE(dispatcher.enqueue_with_event(id2, "test.topic", "payload2"));
+
+    dispatcher.stop();
+
+    EXPECT_EQ(store->get(id1)->status, EventStatus::PUBLISHED);
+    EXPECT_EQ(store->get(id2)->status, EventStatus::PUBLISHED);
+}
+
+TEST(EventDispatcherTest, BrokerFailureMarksEventFailed)
+{
+    auto store = create_in_memory_event_store();
+    FailingMessageBroker broker(true);  // Always throws
+
+    EventDispatcher dispatcher(broker, *store);
+    dispatcher.start();
+
+    auto id = store->create_event("test.topic", "fail_me");
+    EXPECT_TRUE(dispatcher.enqueue_with_event(id, "test.topic", "fail_me"));
+
+    dispatcher.stop();
+
+    auto* ev = store->get(id);
+    ASSERT_NE(ev, nullptr);
+    EXPECT_EQ(ev->status, EventStatus::FAILED);
+    EXPECT_GT(ev->attempt_count, 0u);
+}
+
+TEST(EventDispatcherTest, RetryRetriesFailedPublishAttempt)
+{
+    auto store = create_in_memory_event_store();
+    FailingMessageBroker broker(true);  // Always throws
+
+    EventDispatcher::Config cfg;
+    cfg.max_retries = 3;
+    EventDispatcher dispatcher(broker, *store, cfg);
+    dispatcher.start();
+
+    auto id = store->create_event("test.topic", "retry_me");
+    dispatcher.enqueue_with_event(id, "test.topic", "retry_me");
+
+    dispatcher.stop();
+
+    auto* ev = store->get(id);
+    ASSERT_NE(ev, nullptr);
+    EXPECT_EQ(ev->status, EventStatus::FAILED);
+    // Initial attempt + 3 retries = 4 total attempts
+    EXPECT_EQ(ev->attempt_count, 4u);
+}
+
+TEST(EventDispatcherTest, SuccessfulAfterRetry)
+{
+    auto store = create_in_memory_event_store();
+
+    // A broker that fails first, then succeeds
+    class FlakyBroker : public MessageBroker {
+    public:
+        Offset publish(Message) override {
+            if (fail_count_.fetch_add(1) < 2) {
+                throw std::runtime_error("transient");
+            }
+            return 0;
+        }
+        std::optional<Offset> publish_with_timeout(Message m, std::size_t) override { return publish(std::move(m)); }
+        void subscribe(const Topic&, MessageHandler) override {}
+        void start() override {}
+        void stop() override {}
+        std::size_t queue_size(const Topic&) const override { return 0; }
+        BrokerStats stats() const override { return {}; }
+        std::vector<Message> dead_letters(const Topic&) const override { return {}; }
+        bool was_processed(MessageId) const override { return false; }
+    private:
+        std::atomic<int> fail_count_{0};
+    };
+
+    FlakyBroker broker;
+    EventDispatcher::Config cfg;
+    cfg.max_retries = 5;
+    EventDispatcher dispatcher(broker, *store, cfg);
+    dispatcher.start();
+
+    auto id = store->create_event("test.topic", "succeed_soon");
+    dispatcher.enqueue_with_event(id, "test.topic", "succeed_soon");
+
+    dispatcher.stop();
+
+    auto* ev = store->get(id);
+    ASSERT_NE(ev, nullptr);
+    EXPECT_EQ(ev->status, EventStatus::PUBLISHED);
+    EXPECT_EQ(ev->attempt_count, 3u);  // 2 fails + 1 success
+}
+
+TEST(EventDispatcherTest, ReplayReEnqueuesFailedEvents)
+{
+    auto store = create_in_memory_event_store();
+
+    FailingMessageBroker broker(true);  // Fail initially
+
+    EventDispatcher::Config cfg;
+    cfg.max_retries = 0;  // Fail immediately
+    EventDispatcher dispatcher(broker, *store, cfg);
+    dispatcher.start();
+
+    auto id = store->create_event("test.topic", "replay_me");
+    dispatcher.enqueue_with_event(id, "test.topic", "replay_me");
+    dispatcher.stop();
+
+    // Should be FAILED now
+    EXPECT_EQ(store->get(id)->status, EventStatus::FAILED);
+
+    // Fix the broker and replay
+    broker.set_fail(false);
+    dispatcher.start();
+    auto count = dispatcher.replay_failed();
+    EXPECT_EQ(count, 1u);
+    dispatcher.stop();
+
+    // Should now be PUBLISHED
+    auto* ev = store->get(id);
+    ASSERT_NE(ev, nullptr);
+    EXPECT_EQ(ev->status, EventStatus::PUBLISHED);
+}
+
+TEST(EventDispatcherTest, ReplayPreservesEventId)
+{
+    auto store = create_in_memory_event_store();
+    FailingMessageBroker broker(true);
+
+    EventDispatcher::Config cfg;
+    cfg.max_retries = 0;
+    EventDispatcher dispatcher(broker, *store, cfg);
+    dispatcher.start();
+
+    auto id = store->create_event("test.topic", "preserve_me");
+    dispatcher.enqueue_with_event(id, "test.topic", "preserve_me");
+    dispatcher.stop();
+
+    // Replay with working broker
+    std::atomic<bool> broker_received{false};
+
+    InMemoryMessageBroker workingBroker;
+    workingBroker.subscribe("test.topic", [&](const Message&) {
+        broker_received = true;
+        return true;
+    });
+    workingBroker.start();
+
+    // Create a new dispatcher with the working broker and same store
+    EventDispatcher dispatcher2(workingBroker, *store);
+    dispatcher2.start();
+    auto requeued = dispatcher2.replay_failed();
+    dispatcher2.stop();
+    workingBroker.stop();
+
+    // Verify event was replayed to broker
+    EXPECT_EQ(requeued, 1u);
+    EXPECT_TRUE(broker_received.load());
+    // Verify event_id is preserved in store
+    auto* ev = store->get(id);
+    ASSERT_NE(ev, nullptr);
+    EXPECT_EQ(ev->id, id);
+    EXPECT_EQ(ev->status, EventStatus::PUBLISHED);
+}
+
+TEST(EventDispatcherTest, ReplayDoesNotAffectPublishedEvents)
+{
+    auto store = create_in_memory_event_store();
+    FailingMessageBroker broker(false);
+
+    EventDispatcher dispatcher(broker, *store);
+    dispatcher.start();
+
+    auto id = store->create_event("test.topic", "done");
+    dispatcher.enqueue_with_event(id, "test.topic", "done");
+    dispatcher.stop();
+
+    EXPECT_EQ(store->get(id)->status, EventStatus::PUBLISHED);
+
+    dispatcher.start();
+    auto count = dispatcher.replay_failed();
+    dispatcher.stop();
+
+    EXPECT_EQ(count, 0u);  // Nothing to replay
+    EXPECT_EQ(store->get(id)->status, EventStatus::PUBLISHED);
+}
+
+TEST(EventDispatcherTest, StatsIncludeRetryCount)
+{
+    auto store = create_in_memory_event_store();
+    FailingMessageBroker broker(true);
+
+    EventDispatcher::Config cfg;
+    cfg.max_retries = 2;
+    EventDispatcher dispatcher(broker, *store, cfg);
+    dispatcher.start();
+
+    auto id = store->create_event("test.topic", "retry_stats");
+    dispatcher.enqueue_with_event(id, "test.topic", "retry_stats");
+    dispatcher.stop();
+
+    auto s = dispatcher.stats();
+    EXPECT_EQ(s.retried, 2u);  // 2 retries after initial failure
+    EXPECT_EQ(s.broker_errors, 3u);  // 1 initial + 2 retries
+}
+
+TEST(EventDispatcherTest, ConcurrentEventTrackedEnqueue)
+{
+    auto store = create_in_memory_event_store();
+    FailingMessageBroker broker(false);
+
+    EventDispatcher::Config cfg;
+    cfg.max_queue_size = 200;
+    EventDispatcher dispatcher(broker, *store, cfg);
+    dispatcher.start();
+
+    constexpr int kThreads = 4;
+    constexpr int kPerThread = 25;
+    std::vector<EventId> ids;
+
+    // Create events and enqueue them concurrently
+    std::vector<std::thread> threads;
+    for (int t = 0; t < kThreads; ++t) {
+        threads.emplace_back([&]() {
+            for (int i = 0; i < kPerThread; ++i) {
+                auto id = store->create_event("test.topic", "event");
+                dispatcher.enqueue_with_event(id, "test.topic", "event");
+            }
+        });
+    }
+
+    for (auto& t : threads) {
+        t.join();
+    }
+
+    dispatcher.stop();
+
+    auto s = dispatcher.stats();
+    EXPECT_EQ(s.enqueued, static_cast<std::uint64_t>(kThreads * kPerThread));
+    EXPECT_EQ(s.published, static_cast<std::uint64_t>(kThreads * kPerThread));
+
+    auto storeStats = store->stats();
+    EXPECT_EQ(storeStats.total, static_cast<std::size_t>(kThreads * kPerThread));
+    EXPECT_EQ(storeStats.published, static_cast<std::size_t>(kThreads * kPerThread));
+}
+
+TEST(EventDispatcherTest, ReplayFailedEventsCount)
+{
+    auto store = create_in_memory_event_store();
+
+    // Fail first, then succeed on replay
+    class TempFailBroker : public MessageBroker {
+    public:
+        Offset publish(Message) override {
+            if (failing_.load()) throw std::runtime_error("nope");
+            return 0;
+        }
+        std::optional<Offset> publish_with_timeout(Message m, std::size_t) override { return publish(std::move(m)); }
+        void subscribe(const Topic&, MessageHandler) override {}
+        void start() override {}
+        void stop() override {}
+        std::size_t queue_size(const Topic&) const override { return 0; }
+        BrokerStats stats() const override { return {}; }
+        std::vector<Message> dead_letters(const Topic&) const override { return {}; }
+        bool was_processed(MessageId) const override { return false; }
+        std::atomic<bool> failing_{true};
+    };
+
+    TempFailBroker broker;
+    EventDispatcher::Config cfg;
+    cfg.max_retries = 0;
+    EventDispatcher dispatcher(broker, *store, cfg);
+    dispatcher.start();
+
+    // Create 3 events that will all fail
+    for (int i = 0; i < 3; ++i) {
+        auto id = store->create_event("test.topic", "fail_" + std::to_string(i));
+        dispatcher.enqueue_with_event(id, "test.topic", "fail_" + std::to_string(i));
+    }
+    dispatcher.stop();
+
+    auto stats1 = store->stats();
+    EXPECT_EQ(stats1.failed, 3u);
+    EXPECT_EQ(stats1.published, 0u);
+
+    // Fix broker and replay
+    broker.failing_ = false;
+    dispatcher.start();
+    auto count = dispatcher.replay_failed();
+    dispatcher.stop();
+
+    EXPECT_EQ(count, 3u);
+    auto stats2 = store->stats();
+    EXPECT_EQ(stats2.published, 3u);
+    EXPECT_EQ(stats2.failed, 0u);
+    EXPECT_GE(stats2.retried, 3u);
 }
 
 } // namespace
