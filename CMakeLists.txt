@@ -82,7 +82,8 @@ add_library(dse_core STATIC
     src/in_memory_message_broker.cpp
     src/document_event.cpp
     src/event_dispatcher.cpp
-    src/event_store.cpp)
+    src/event_store.cpp
+    src/persistent_event_store.cpp)
 target_include_directories(dse_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_options(dse_core PRIVATE ${PROJECT_WARNINGS})
 target_link_libraries(dse_core PUBLIC httplib::httplib nlohmann_json::nlohmann_json)
@@ -317,4 +318,9 @@ if(BUILD_TESTING)
     gtest_discover_tests(document_event_test)
     gtest_discover_tests(event_dispatcher_test)
     gtest_discover_tests(event_store_test)
+
+    add_executable(persistent_event_store_test tests/persistent_event_store_test.cpp)
+    target_compile_options(persistent_event_store_test PRIVATE ${PROJECT_WARNINGS})
+    target_link_libraries(persistent_event_store_test PRIVATE GTest::gtest_main dse_core)
+    gtest_discover_tests(persistent_event_store_test)
 endif()
