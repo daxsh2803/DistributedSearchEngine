@@ -44,5 +44,10 @@ Thumbs.db
 
 # Local environment
 .env
+
+# Docker
+/docker/data/
+/docker/*.log
+
 # AI agent tooling
 .freebuff/

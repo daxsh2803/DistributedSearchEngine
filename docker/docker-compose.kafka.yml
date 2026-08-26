@@ -1,0 +1,95 @@
+# Distributed Search Engine - Kafka Development Infrastructure (Phase 19A)
+#
+# Single-node Apache Kafka in KRaft mode (no ZooKeeper).
+# For local development and testing only.
+#
+# Usage:
+#   docker compose -f docker/docker-compose.kafka.yml up -d
+#   docker compose -f docker/docker-compose.kafka.yml ps
+#   docker compose -f docker/docker-compose.kafka.yml exec kafka kafka-topics.sh --bootstrap-server kafka:9092 --list
+#   docker compose -f docker/docker-compose.kafka.yml down -v
+#
+# Kafka version: 4.3.1 (KRaft-only, no ZooKeeper)
+# Internal listener: kafka:9092 (container-to-container)
+# External listener: localhost:9094 (host access)
+# Controller: localhost:9093 (internal)
+
+services:
+  kafka:
+    image: apache/kafka:4.3.1
+    container_name: dse-kafka
+    hostname: kafka
+    ports:
+      - "9094:9094"
+    environment:
+      # Node identity
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+
+      # Listeners
+      # INTERNAL: for container-to-container communication (kafka-init, future app containers)
+      # EXTERNAL: for host machine access (your development machine)
+      # CONTROLLER: for KRaft controller communication
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,EXTERNAL://0.0.0.0:9094
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+
+      # KRaft quorum (single node)
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+
+      # Replication (single node - no replication needed)
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_MIN_INSYNC_REPLICAS: 1
+
+      # Log retention (development only - keep data short-term)
+      KAFKA_LOG_RETENTION_HOURS: 1
+      KAFKA_LOG_RETENTION_BYTES: 1073741824
+
+      # Memory limit for development
+      KAFKA_HEAP_OPTS: -Xmx256m -Xms128m
+
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+    # Ephemeral storage - no persistent host mounts for development
+    # Data is lost when container is removed (by design for dev)
+    tmpfs:
+      - /tmp
+
+    networks:
+      - kafka
+
+  # Topic initialization service (runs once after Kafka is healthy)
+  kafka-init:
+    image: apache/kafka:4.3.1
+    container_name: dse-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "Creating topics..."
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic documents.indexed --partitions 3 --replication-factor 1
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic documents.updated --partitions 3 --replication-factor 1
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic documents.removed --partitions 3 --replication-factor 1
+        echo "Verifying topics..."
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list
+        echo "Topics created successfully."
+    restart: "no"
+    networks:
+      - kafka
+
+networks:
+  kafka:
+    driver: bridge
