@@ -22,10 +22,13 @@
 // Shutdown: press Ctrl+C (SIGINT) or send SIGTERM.
 
 #include "http_server.h"
+#include "in_memory_message_broker.h"
 #include "local_node.h"
 #include "metrics.h"
 #include "node_client.h"
 #include "node_config.h"
+#include "persistent_event_store.h"
+#include "event_dispatcher.h"
 #include "shard.h"
 #include "shard_coordinator.h"
 #include "shard_router.h"
@@ -154,7 +157,7 @@ std::size_t resolve_shard_count(int argc, char* argv[])
 
 int main(int argc, char* argv[])
 {
-    std::cout << "Distributed Search Engine | Phase 11 - Node Abstraction\n";
+    std::cout << "Distributed Search Engine | Phase 18 - Async Messaging Pipeline\n";
     std::cout << "Built with C++ standard: " << __cplusplus << "\n\n";
 
     // --- Resolve configuration ---
@@ -185,10 +188,30 @@ int main(int argc, char* argv[])
     // --- Create metrics collector (shared by coordinator and HTTP server) ---
     dse::MetricsCollector metrics;
 
+    // --- Create event system (Phase 18) ---
+    // PersistentEventStore: durable outbox for event lifecycle tracking.
+    // Recovers PENDING/FAILED events from previous runs on construction.
+    dse::PersistentEventStore eventStore(data_dir + "events");
+
+    // InMemoryMessageBroker: at-least-once delivery with retry support.
+    dse::BrokerConfig brokerConfig;
+    brokerConfig.max_queue_size = 4096;
+    brokerConfig.consumer_threads = 2;
+    brokerConfig.enable_idempotency = true;
+    dse::InMemoryMessageBroker broker(brokerConfig);
+
+    // EventDispatcher: bounded async dispatch with retry support.
+    dse::EventDispatcher::Config dispatcherConfig;
+    dispatcherConfig.max_retries = 3;
+    dispatcherConfig.retry_delay_ms = 100;
+    dse::EventDispatcher dispatcher(broker, eventStore, dispatcherConfig);
+
     // --- Create coordinator ---
     auto coordinator = std::make_unique<dse::ShardCoordinator>(
         std::move(router), std::move(shard_placement), std::move(nodes));
     coordinator->set_metrics(&metrics);
+    coordinator->set_event_store(&eventStore);
+    coordinator->set_event_dispatcher(&dispatcher);
 
     // --- Startup recovery: load persisted documents or seed corpus ---
     bool loaded_persistence = false;
@@ -216,8 +239,13 @@ int main(int argc, char* argv[])
         return 1;
     }
 
+    // --- Start the event system ---
+    dispatcher.start();
+    broker.start();
+    std::cout << "Event system started\n";
+
     // --- Start the HTTP server ---
-    dse::HttpServer server(*coordinator, &metrics);
+    dse::HttpServer server(*coordinator, &metrics, &eventStore);
     g_server.store(&server);
 
     std::signal(SIGINT, signal_handler);
@@ -243,6 +271,14 @@ int main(int argc, char* argv[])
 
     server_thread.join();
     g_server.store(nullptr);
+
+    // --- Shutdown event system in correct order ---
+    // 1. Stop accepting new events and drain the queue
+    dispatcher.stop();
+    // 2. Persist any remaining events to disk
+    eventStore.flush();
+    // 3. Stop the message broker
+    broker.stop();
 
     std::cout << "\nServer stopped.\n";
     return 0;

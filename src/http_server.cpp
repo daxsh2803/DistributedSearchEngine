@@ -8,6 +8,7 @@
 // portable across all platforms including MinGW/MSYS2.
 
 #include "http_server.h"
+#include "event_store.h"
 #include "metrics.h"
 #include "shard_coordinator.h"
 
@@ -85,9 +86,11 @@ void error_response(httplib::Response& res, int status, const std::string& msg)
 // ---------------------------------------------------------------------------
 
 HttpServer::HttpServer(ShardCoordinator& coordinator,
-                       MetricsCollector* metrics)
+                       MetricsCollector* metrics,
+                       EventStore* eventStore)
     : coordinator_(coordinator)
     , metrics_(metrics)
+    , eventStore_(eventStore)
     , server_(std::make_unique<httplib::Server>())
 {
     register_routes();
@@ -215,6 +218,18 @@ void HttpServer::register_routes()
             };
         }
         j["per_node"] = per_node;
+
+        // Event delivery metrics (from EventStore, Phase 18)
+        if (eventStore_) {
+            const auto eventStats = eventStore_->stats();
+            j["events_total"] = eventStats.total;
+            j["events_pending"] = eventStats.pending;
+            j["events_dispatching"] = eventStats.dispatching;
+            j["events_published"] = eventStats.published;
+            j["events_failed"] = eventStats.failed;
+            j["events_retried"] = eventStats.retried;
+            j["events_replayed"] = eventStats.replayed;
+        }
 
         res.status = 200;
         res.set_content(j.dump(), "application/json");

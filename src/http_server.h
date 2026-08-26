@@ -28,13 +28,16 @@ namespace dse {
 
 class ShardCoordinator;
 class MetricsCollector;
+class EventStore;
 
 class HttpServer {
 public:
     // Construct with optional MetricsCollector for /metrics endpoint.
     // When metrics is nullptr, /metrics returns HTTP 503.
+    // When eventStore is nullptr, event metrics are omitted from /metrics.
     explicit HttpServer(ShardCoordinator& coordinator,
-                        MetricsCollector* metrics = nullptr);
+                        MetricsCollector* metrics = nullptr,
+                        EventStore* eventStore = nullptr);
     ~HttpServer();
 
     HttpServer(const HttpServer&) = delete;
@@ -52,6 +55,7 @@ private:
 
     ShardCoordinator& coordinator_;
     MetricsCollector* metrics_ = nullptr;  // optional, not owned
+    EventStore* eventStore_ = nullptr;      // optional, not owned
     std::unique_ptr<httplib::Server> server_;
     int port_ = 0;
 };
