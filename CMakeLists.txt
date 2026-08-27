@@ -54,6 +54,23 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(nlohmann_json)
 
 # ---------------------------------------------------------------------------
+# Optional Kafka support via librdkafka.
+# When ENABLE_KAFKA=ON, KafkaClient is compiled and linked.
+# When OFF (default), no Kafka code is built.
+# ---------------------------------------------------------------------------
+option(ENABLE_KAFKA "Build with Kafka producer support (requires librdkafka)" OFF)
+
+if(ENABLE_KAFKA)
+    # RdKafka ships its own FindLZ4.cmake alongside RdKafkaConfig.cmake.
+    # Add the RdKafka cmake directory to CMAKE_MODULE_PATH so that
+    # find_dependency(LZ4) inside RdKafkaConfig.cmake can find it.
+    # CMAKE_PREFIX_PATH must point to the librdkafka install prefix
+    # (e.g. /c/msys64/ucrt64) for find_package(RdKafka) to succeed.
+    list(APPEND CMAKE_MODULE_PATH "${CMAKE_PREFIX_PATH}/lib/cmake/RdKafka")
+    find_package(RdKafka REQUIRED)
+endif()
+
+# ---------------------------------------------------------------------------
 # Core library. Shared by the application and the tests.
 # The include directory is PUBLIC so consumers can #include "tokenizer.h"
 # cleanly; warnings are PRIVATE so they do not leak into consumers.
@@ -84,9 +101,27 @@ add_library(dse_core STATIC
     src/event_dispatcher.cpp
     src/event_store.cpp
     src/persistent_event_store.cpp)
+if(ENABLE_KAFKA)
+    target_sources(dse_core PRIVATE src/kafka_client.cpp)
+endif()
 target_include_directories(dse_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_options(dse_core PRIVATE ${PROJECT_WARNINGS})
 target_link_libraries(dse_core PUBLIC httplib::httplib nlohmann_json::nlohmann_json)
+if(ENABLE_KAFKA)
+    target_link_libraries(dse_core PUBLIC RdKafka::rdkafka++)
+    target_compile_definitions(dse_core PUBLIC DSE_KAFKA_ENABLED=1)
+    # Ensure librdkafka C++ headers (rdkafkacpp.h) are available.
+    # The RdKafka imported target may not propagate include dirs on all
+    # platforms, so resolve the path from the found config and add it.
+    # librdkafka headers live in <prefix>/include/librdkafka/ but
+    # rdkafkacpp.h uses #include "rdkafkacpp.h" (not <librdkafka/...>).
+    # The package's INTERFACE_INCLUDE_DIRECTORIES points to <prefix>/include
+    # which does not contain the headers directly. Add the correct path.
+    get_filename_component(_rdkafka_prefix "${RdKafka_DIR}/../../../" ABSOLUTE)
+    if(EXISTS "${_rdkafka_prefix}/include/librdkafka/rdkafkacpp.h")
+        target_include_directories(dse_core PRIVATE "${_rdkafka_prefix}/include/librdkafka")
+    endif()
+endif()
 
 # ---------------------------------------------------------------------------
 # Main executable.
@@ -328,4 +363,11 @@ if(BUILD_TESTING)
     target_compile_options(event_integration_test PRIVATE ${PROJECT_WARNINGS})
     target_link_libraries(event_integration_test PRIVATE GTest::gtest_main dse_core)
     gtest_discover_tests(event_integration_test)
+
+    if(ENABLE_KAFKA)
+        add_executable(kafka_client_test tests/kafka_client_test.cpp)
+        target_compile_options(kafka_client_test PRIVATE ${PROJECT_WARNINGS})
+        target_link_libraries(kafka_client_test PRIVATE GTest::gtest_main dse_core)
+        gtest_discover_tests(kafka_client_test)
+    endif()
 endif()
