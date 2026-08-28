@@ -1,18 +1,24 @@
-// Distributed Search Engine - Kafka Message Broker (Phase 19C).
+// Distributed Search Engine - Kafka Message Broker (Phase 19C/19D).
 //
-// Implementation of KafkaMessageBroker using KafkaClient.
-// Maps MessageBroker::publish() to KafkaClient::produce_async().
+// Implementation of KafkaMessageBroker using KafkaClient (producer) and
+// KafkaConsumer (consumer groups).
 //
-// The poll thread processes librdkafka delivery reports. It is started
-// lazily on the first publish() call and joined during stop().
+// Producer: maps MessageBroker::publish() to KafkaClient::produce_async().
+// Consumer: polls KafkaConsumer in a dedicated thread, dispatches messages
+// to registered handlers, and commits offsets after successful processing.
+//
+// Manual offset commits provide at-least-once delivery: failed handlers
+// do not commit offsets, so Kafka will redeliver on restart.
 
 #include "kafka_message_broker.h"
 
 #include <chrono>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 #include "kafka_client.h"
+#include "kafka_consumer.h"
 
 namespace dse {
 
@@ -23,6 +29,7 @@ namespace dse {
 KafkaMessageBroker::KafkaMessageBroker(KafkaBrokerConfig config)
     : config_(std::move(config))
 {
+    // Create the producer.
     KafkaClientConfig client_cfg;
     client_cfg.bootstrap_servers = config_.bootstrap_servers;
     client_cfg.client_id = config_.client_id;
@@ -35,7 +42,7 @@ KafkaMessageBroker::~KafkaMessageBroker()
 }
 
 // ---------------------------------------------------------------------------
-// Poll thread
+// Producer poll thread
 // ---------------------------------------------------------------------------
 
 void KafkaMessageBroker::ensure_poll_thread_started()
@@ -52,7 +59,6 @@ void KafkaMessageBroker::poll_loop()
         if (client_ && client_->is_healthy()) {
             client_->poll(config_.poll_interval_ms);
         } else {
-            // Client unhealthy — sleep briefly to avoid busy-wait.
             std::this_thread::sleep_for(
                 std::chrono::milliseconds(config_.poll_interval_ms));
         }
@@ -72,13 +78,10 @@ Offset KafkaMessageBroker::publish(Message message)
 {
     ensure_poll_thread_started();
 
-    // Try async produce — returns true if accepted into librdkafka queue.
     bool accepted = client_->produce_async(
         message.topic, message.payload, /*key=*/"");
 
     if (!accepted) {
-        // Producer queue full or client closed — throw to let
-        // EventDispatcher apply its existing retry policy.
         throw std::runtime_error(
             "KafkaMessageBroker: produce_async rejected message: "
             + client_->last_error());
@@ -91,10 +94,6 @@ Offset KafkaMessageBroker::publish(Message message)
 std::optional<Offset> KafkaMessageBroker::publish_with_timeout(
     Message message, std::size_t timeout_ms)
 {
-    // KafkaClient::produce_async() does not block — it either accepts
-    // or rejects immediately. The timeout parameter is therefore used
-    // as a total deadline: we try async first, and if that fails, we
-    // fall back to the synchronous produce() with the given timeout.
     ensure_poll_thread_started();
 
     bool accepted = client_->produce_async(
@@ -117,41 +116,196 @@ std::optional<Offset> KafkaMessageBroker::publish_with_timeout(
         }
     }
 
-    // Both attempts failed.
     ++messages_failed_;
     return std::nullopt;
 }
 
 // ---------------------------------------------------------------------------
-// Consumer API — minimal stubs (Phase 19D)
+// Consumer API (Phase 19D)
 // ---------------------------------------------------------------------------
 
-void KafkaMessageBroker::subscribe(const Topic& /*topic*/,
-                                    MessageHandler /*handler*/)
+void KafkaMessageBroker::subscribe(const Topic& topic,
+                                    MessageHandler handler)
 {
-    // Consumer groups are deferred to Phase 19D.
-    // Intentionally no-op: KafkaMessageBroker is producer-only in 19C.
+    std::lock_guard<std::mutex> lock(handler_mutex_);
+    handlers_[topic] = std::move(handler);
 }
 
 void KafkaMessageBroker::start()
 {
-    // Start the poll thread for delivery report processing.
+    // Start the producer poll thread.
     ensure_poll_thread_started();
+
+    // Start the consumer thread if there are registered handlers.
+    {
+        std::lock_guard<std::mutex> lock(handler_mutex_);
+        if (handlers_.empty()) {
+            return;  // No consumers to start.
+        }
+    }
+
+    bool expected = false;
+    if (!consumer_running_.compare_exchange_strong(expected, true)) {
+        return;  // Already running.
+    }
+
+    // Build the list of topics to subscribe to.
+    std::vector<std::string> topics;
+    {
+        std::lock_guard<std::mutex> lock(handler_mutex_);
+        for (const auto& [topic, handler] : handlers_) {
+            topics.push_back(topic);
+        }
+    }
+
+    // Create the consumer.
+    KafkaConsumerConfig consumer_cfg;
+    consumer_cfg.bootstrap_servers = config_.bootstrap_servers;
+    consumer_cfg.client_id = config_.consumer_client_id;
+    consumer_cfg.group_id = config_.group_id;
+    consumer_cfg.auto_offset_reset = config_.auto_offset_reset;
+    consumer_cfg.poll_timeout_ms = config_.consumer_poll_timeout_ms;
+    consumer_cfg.topics = std::move(topics);
+
+    consumer_ = std::make_unique<KafkaConsumer>(std::move(consumer_cfg));
+
+    // Start the consumer thread.
+    consumer_thread_ = std::thread(&KafkaMessageBroker::consumer_loop, this);
 }
 
 void KafkaMessageBroker::stop()
 {
-    // Stop the poll thread first (it references client_).
+    // Stop the consumer thread first (it references consumer_).
+    if (consumer_running_.exchange(false)) {
+        if (consumer_thread_.joinable()) {
+            consumer_thread_.join();
+        }
+    }
+
+    // Close the consumer.
+    if (consumer_) {
+        consumer_->close();
+        consumer_.reset();
+    }
+
+    // Stop the producer poll thread.
     if (poll_running_.exchange(false)) {
         if (poll_thread_.joinable()) {
             poll_thread_.join();
         }
     }
 
-    // Flush pending messages and close the client.
+    // Flush pending messages and close the producer.
     if (client_ && client_->is_healthy()) {
         client_->flush(5000);
         client_->close();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Consumer loop (Phase 19D)
+// ---------------------------------------------------------------------------
+
+void KafkaMessageBroker::consumer_loop()
+{
+    while (consumer_running_.load(std::memory_order_relaxed)) {
+        if (!consumer_ || !consumer_->is_healthy()) {
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(config_.consumer_poll_timeout_ms));
+            continue;
+        }
+
+        auto msg = consumer_->poll(config_.consumer_poll_timeout_ms);
+
+        if (msg.is_error) {
+            // ERR__TIMED_OUT is normal — means no message available.
+            // Other errors are logged but do not crash the loop.
+            if (msg.error_code != KafkaConsumerMessage::ERR_TIMEOUT) {
+                // Transient error — continue polling.
+            }
+            continue;
+        }
+
+        // Look up the handler for this topic.
+        MessageHandler handler;
+        {
+            std::lock_guard<std::mutex> lock(handler_mutex_);
+            auto it = handlers_.find(msg.topic);
+            if (it != handlers_.end()) {
+                handler = it->second;
+            }
+        }
+
+        if (!handler) {
+            // No handler for this topic — skip the message.
+            // Do not commit offset so Kafka can redeliver if needed.
+            continue;
+        }
+
+        // Convert to Message for the handler.
+        Message broker_msg;
+        broker_msg.topic = msg.topic;
+        broker_msg.payload = std::move(msg.payload);
+        broker_msg.offset = static_cast<std::uint64_t>(msg.offset);
+
+        ++messages_consumed_;
+
+        // Invoke handler synchronously.
+        bool success = false;
+        try {
+            success = handler(broker_msg);
+        } catch (...) {
+            success = false;
+        }
+
+        if (success) {
+            ++messages_acked_;
+            // Store this specific offset for commit.
+            // Only successful messages have their offsets committed,
+            // providing at-least-once delivery across restarts.
+            consumer_->store_offset(msg);
+        } else {
+            ++messages_nacked_;
+            // Do NOT store/commit this offset — Kafka will redeliver
+            // on restart/rebalance from the last committed offset.
+        }
+    }
+
+    // Final cleanup: process any remaining messages in the queue.
+    if (consumer_ && consumer_->is_healthy()) {
+        for (int i = 0; i < 10; ++i) {
+            auto msg = consumer_->poll(0);
+            if (msg.is_error) break;
+
+            MessageHandler handler;
+            {
+                std::lock_guard<std::mutex> lock(handler_mutex_);
+                auto it = handlers_.find(msg.topic);
+                if (it != handlers_.end()) {
+                    handler = it->second;
+                }
+            }
+
+            if (!handler) continue;
+
+            Message broker_msg;
+            broker_msg.topic = std::move(msg.topic);
+            broker_msg.payload = std::move(msg.payload);
+            broker_msg.offset = static_cast<std::uint64_t>(msg.offset);
+
+            ++messages_consumed_;
+
+            try {
+                if (handler(broker_msg)) {
+                    ++messages_acked_;
+                    consumer_->commit();
+                } else {
+                    ++messages_nacked_;
+                }
+            } catch (...) {
+                ++messages_nacked_;
+            }
+        }
     }
 }
 
@@ -161,8 +315,6 @@ void KafkaMessageBroker::stop()
 
 std::size_t KafkaMessageBroker::queue_size(const Topic& /*topic*/) const
 {
-    // Kafka does not expose per-topic local queue depth through the
-    // MessageBroker abstraction. Return the outqueue length as a proxy.
     if (client_) {
         return client_->outqueue_length();
     }
@@ -174,9 +326,9 @@ BrokerStats KafkaMessageBroker::stats() const
     BrokerStats s;
     s.messages_published =
         messages_published_.load(std::memory_order_relaxed);
-    s.messages_delivered = 0;   // not tracked at broker level
-    s.messages_acknowledged = 0;  // not tracked at broker level
-    s.messages_retried = 0;    // retries are EventDispatcher's job
+    s.messages_delivered = messages_consumed_.load(std::memory_order_relaxed);
+    s.messages_acknowledged = messages_acked_.load(std::memory_order_relaxed);
+    s.messages_retried = 0;  // retries are EventDispatcher's job
     s.messages_dead_lettered = 0;
     s.queue_depth = queue_size("");
     return s;
@@ -185,14 +337,11 @@ BrokerStats KafkaMessageBroker::stats() const
 std::vector<Message> KafkaMessageBroker::dead_letters(
     const Topic& /*topic*/) const
 {
-    // KafkaMessageBroker does not maintain a dead-letter queue.
-    // Failed events are tracked by the EventStore (Phase 18E).
     return {};
 }
 
 bool KafkaMessageBroker::was_processed(MessageId /*id*/) const
 {
-    // Idempotency checking is not implemented in KafkaMessageBroker.
     return false;
 }
 
@@ -208,6 +357,16 @@ const KafkaClient& KafkaMessageBroker::client() const
 std::uint64_t KafkaMessageBroker::delivery_reports_count() const
 {
     return client_ ? client_->delivery_reports_count() : 0;
+}
+
+std::uint64_t KafkaMessageBroker::messages_consumed() const
+{
+    return messages_consumed_.load(std::memory_order_relaxed);
+}
+
+std::uint64_t KafkaMessageBroker::rebalance_count() const
+{
+    return consumer_ ? consumer_->rebalance_count() : 0;
 }
 
 } // namespace dse

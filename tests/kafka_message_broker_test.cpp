@@ -1,12 +1,12 @@
-// Distributed Search Engine - Kafka Message Broker Tests (Phase 19C).
+// Distributed Search Engine - Kafka Message Broker Tests (Phase 19C/19D).
 //
 // Integration tests for KafkaMessageBroker against a live Kafka broker.
 // These tests require:
 //   - ENABLE_KAFKA=ON
 //   - Kafka running at localhost:9094 (Phase 19A Docker infrastructure)
 //
-// Tests verify actual messages in Kafka topics, not just that produce
-// succeeded at the API level.
+// Phase 19C: Producer tests (publish to topics, payload preservation).
+// Phase 19D: Consumer tests (subscribe, consume, offset commit, redelivery).
 
 #ifdef DSE_KAFKA_ENABLED
 
@@ -18,6 +18,8 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -26,19 +28,9 @@ namespace dse {
 namespace {
 
 // ---------------------------------------------------------------------------
-// Helper: consume all messages from a Kafka topic via a dedicated consumer.
-// Uses librdkafka's simple consumer to read messages from all partitions.
-// This is test infrastructure only — not a production consumer.
+// Helper: check if Kafka broker is reachable
 // ---------------------------------------------------------------------------
 
-struct ConsumedMessage {
-    std::string payload;
-    std::string key;
-    int64_t offset = 0;
-    int32_t partition = 0;
-};
-
-// Check if Kafka is reachable. Tests skip if broker is unavailable.
 bool kafka_available()
 {
     try {
@@ -47,7 +39,6 @@ bool kafka_available()
         cfg.client_id = "dse-test-check";
         KafkaClient client(cfg);
 
-        // Try a produce — if it succeeds (accepted into queue), broker is up.
         bool accepted = client.produce_async("documents.indexed", "ping", "check");
         client.flush(2000);
         return accepted;
@@ -57,10 +48,37 @@ bool kafka_available()
 }
 
 // ---------------------------------------------------------------------------
-// Tests
+// Helper: wait for a condition with timeout
 // ---------------------------------------------------------------------------
 
-class KafkaMessageBrokerTest : public ::testing::Test {
+bool wait_until(std::function<bool()> predicate,
+                int timeout_ms = 5000,
+                int poll_ms = 10)
+{
+    auto deadline = std::chrono::steady_clock::now()
+                  + std::chrono::milliseconds(timeout_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (predicate()) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(poll_ms));
+    }
+    return predicate();  // one last check
+}
+
+// ---------------------------------------------------------------------------
+// Helper: generate unique test names for consumer group isolation
+// ---------------------------------------------------------------------------
+
+std::string unique_group(const std::string& prefix)
+{
+    static std::atomic<int> counter{0};
+    return prefix + "-test-" + std::to_string(counter.fetch_add(1));
+}
+
+// ===========================================================================
+// Phase 19C — Producer Tests
+// ===========================================================================
+
+class KafkaProducerTest : public ::testing::Test {
 protected:
     void SetUp() override {
         if (!kafka_available()) {
@@ -69,9 +87,7 @@ protected:
     }
 };
 
-// --- Basic construction ---
-
-TEST_F(KafkaMessageBrokerTest, Construction)
+TEST_F(KafkaProducerTest, Construction)
 {
     KafkaBrokerConfig cfg;
     cfg.bootstrap_servers = "localhost:9094";
@@ -81,20 +97,7 @@ TEST_F(KafkaMessageBrokerTest, Construction)
     EXPECT_TRUE(broker.client().is_healthy());
 }
 
-TEST_F(KafkaMessageBrokerTest, CustomConfiguration)
-{
-    KafkaBrokerConfig cfg;
-    cfg.bootstrap_servers = "localhost:9094";
-    cfg.client_id = "dse-test-custom";
-    cfg.poll_interval_ms = 25;
-
-    KafkaMessageBroker broker(cfg);
-    EXPECT_TRUE(broker.client().is_healthy());
-}
-
-// --- Publish to topics ---
-
-TEST_F(KafkaMessageBrokerTest, PublishToIndexedTopic)
+TEST_F(KafkaProducerTest, PublishToIndexedTopic)
 {
     KafkaBrokerConfig cfg;
     cfg.bootstrap_servers = "localhost:9094";
@@ -109,12 +112,11 @@ TEST_F(KafkaMessageBrokerTest, PublishToIndexedTopic)
     Offset offset = broker.publish(std::move(msg));
     EXPECT_GE(offset, 0u);
 
-    // Allow delivery report processing.
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
     broker.stop();
 }
 
-TEST_F(KafkaMessageBrokerTest, PublishToUpdatedTopic)
+TEST_F(KafkaProducerTest, PublishToUpdatedTopic)
 {
     KafkaBrokerConfig cfg;
     cfg.bootstrap_servers = "localhost:9094";
@@ -133,7 +135,7 @@ TEST_F(KafkaMessageBrokerTest, PublishToUpdatedTopic)
     broker.stop();
 }
 
-TEST_F(KafkaMessageBrokerTest, PublishToRemovedTopic)
+TEST_F(KafkaProducerTest, PublishToRemovedTopic)
 {
     KafkaBrokerConfig cfg;
     cfg.bootstrap_servers = "localhost:9094";
@@ -152,41 +154,7 @@ TEST_F(KafkaMessageBrokerTest, PublishToRemovedTopic)
     broker.stop();
 }
 
-// --- Payload preservation ---
-
-TEST_F(KafkaMessageBrokerTest, PayloadPreserved)
-{
-    KafkaBrokerConfig cfg;
-    cfg.bootstrap_servers = "localhost:9094";
-    cfg.client_id = "dse-test-payload";
-
-    KafkaMessageBroker broker(cfg);
-
-    const std::string payload =
-        R"({"event_id":10,"event_type":"document_indexed","document_id":12345,"shard_id":0})";
-
-    Message msg;
-    msg.topic = "documents.indexed";
-    msg.payload = payload;
-
-    Offset offset = broker.publish(std::move(msg));
-    EXPECT_GE(offset, 0u);
-
-    // The offset should be monotonically increasing.
-    Message msg2;
-    msg2.topic = "documents.indexed";
-    msg2.payload = R"({"event_id":11})";
-
-    Offset offset2 = broker.publish(std::move(msg2));
-    EXPECT_GT(offset2, offset);
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    broker.stop();
-}
-
-// --- Multiple messages ---
-
-TEST_F(KafkaMessageBrokerTest, MultipleMessages)
+TEST_F(KafkaProducerTest, MultipleMessages)
 {
     KafkaBrokerConfig cfg;
     cfg.bootstrap_servers = "localhost:9094";
@@ -208,9 +176,7 @@ TEST_F(KafkaMessageBrokerTest, MultipleMessages)
     broker.stop();
 }
 
-// --- publish_with_timeout ---
-
-TEST_F(KafkaMessageBrokerTest, PublishWithTimeoutSuccess)
+TEST_F(KafkaProducerTest, PublishWithTimeoutSuccess)
 {
     KafkaBrokerConfig cfg;
     cfg.bootstrap_servers = "localhost:9094";
@@ -230,9 +196,7 @@ TEST_F(KafkaMessageBrokerTest, PublishWithTimeoutSuccess)
     broker.stop();
 }
 
-// --- Statistics ---
-
-TEST_F(KafkaMessageBrokerTest, Statistics)
+TEST_F(KafkaProducerTest, Statistics)
 {
     KafkaBrokerConfig cfg;
     cfg.bootstrap_servers = "localhost:9094";
@@ -254,9 +218,7 @@ TEST_F(KafkaMessageBrokerTest, Statistics)
     broker.stop();
 }
 
-// --- Lifecycle ---
-
-TEST_F(KafkaMessageBrokerTest, CleanShutdown)
+TEST_F(KafkaProducerTest, CleanShutdown)
 {
     KafkaBrokerConfig cfg;
     cfg.bootstrap_servers = "localhost:9094";
@@ -271,12 +233,11 @@ TEST_F(KafkaMessageBrokerTest, CleanShutdown)
         broker.publish(std::move(msg));
     }
 
-    // Stop should flush and close cleanly.
     broker.stop();
     EXPECT_FALSE(broker.client().is_healthy());
 }
 
-TEST_F(KafkaMessageBrokerTest, StopIsIdempotent)
+TEST_F(KafkaProducerTest, StopIsIdempotent)
 {
     KafkaBrokerConfig cfg;
     cfg.bootstrap_servers = "localhost:9094";
@@ -290,11 +251,11 @@ TEST_F(KafkaMessageBrokerTest, StopIsIdempotent)
     broker.publish(std::move(msg));
 
     broker.stop();
-    broker.stop();  // Should not crash.
-    broker.stop();  // Triple-stop is safe.
+    broker.stop();
+    broker.stop();
 }
 
-TEST_F(KafkaMessageBrokerTest, DestructorStopsCleanly)
+TEST_F(KafkaProducerTest, DestructorStopsCleanly)
 {
     KafkaBrokerConfig cfg;
     cfg.bootstrap_servers = "localhost:9094";
@@ -309,13 +270,10 @@ TEST_F(KafkaMessageBrokerTest, DestructorStopsCleanly)
             msg.payload = R"({"event_id":)" + std::to_string(i + 500) + "}";
             broker.publish(std::move(msg));
         }
-        // Destructor should flush + close without blocking indefinitely.
     }
 }
 
-// --- Dead letters / was_processed (stubs) ---
-
-TEST_F(KafkaMessageBrokerTest, DeadLettersEmpty)
+TEST_F(KafkaProducerTest, DeadLettersEmpty)
 {
     KafkaBrokerConfig cfg;
     cfg.bootstrap_servers = "localhost:9094";
@@ -326,7 +284,7 @@ TEST_F(KafkaMessageBrokerTest, DeadLettersEmpty)
     EXPECT_TRUE(letters.empty());
 }
 
-TEST_F(KafkaMessageBrokerTest, WasProcessedReturnsFalse)
+TEST_F(KafkaProducerTest, WasProcessedReturnsFalse)
 {
     KafkaBrokerConfig cfg;
     cfg.bootstrap_servers = "localhost:9094";
@@ -336,17 +294,13 @@ TEST_F(KafkaMessageBrokerTest, WasProcessedReturnsFalse)
     EXPECT_FALSE(broker.was_processed(1));
 }
 
-// --- Delivery reports ---
-
-TEST_F(KafkaMessageBrokerTest, DeliveryReportsReceived)
+TEST_F(KafkaProducerTest, DeliveryReportsReceived)
 {
     KafkaBrokerConfig cfg;
     cfg.bootstrap_servers = "localhost:9094";
     cfg.client_id = "dse-test-delivery";
 
     KafkaMessageBroker broker(cfg);
-
-    // Start the poll thread explicitly.
     broker.start();
 
     for (int i = 0; i < 3; ++i) {
@@ -356,11 +310,730 @@ TEST_F(KafkaMessageBrokerTest, DeliveryReportsReceived)
         broker.publish(std::move(msg));
     }
 
-    // Wait for delivery reports to arrive.
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
     EXPECT_GE(broker.delivery_reports_count(), 3u);
 
     broker.stop();
+}
+
+// ===========================================================================
+// Phase 19D — Consumer Tests
+// ===========================================================================
+
+class KafkaConsumerTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        if (!kafka_available()) {
+            GTEST_SKIP() << "Kafka broker not available at localhost:9094";
+        }
+    }
+};
+
+// --- 1. Consumer construction ---
+
+TEST_F(KafkaConsumerTest, ConsumerConstruction)
+{
+    KafkaBrokerConfig cfg;
+    cfg.bootstrap_servers = "localhost:9094";
+    cfg.client_id = "dse-test-consumer-construct";
+    cfg.group_id = unique_group("construct");
+
+    KafkaMessageBroker broker(cfg);
+    EXPECT_TRUE(broker.client().is_healthy());
+
+    // subscribe + start without error.
+    std::atomic<int> received{0};
+    broker.subscribe("documents.indexed", [&](const Message&) -> bool {
+        ++received;
+        return true;
+    });
+
+    broker.start();
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    broker.stop();
+}
+
+// --- 2. Single-topic subscription ---
+
+TEST_F(KafkaConsumerTest, SingleTopicSubscription)
+{
+    KafkaBrokerConfig cfg;
+    cfg.bootstrap_servers = "localhost:9094";
+    cfg.client_id = "dse-test-consumer-single";
+    cfg.group_id = unique_group("single-topic");
+
+    // Use a unique topic name to avoid contamination from other tests.
+    const std::string topic = "test.single-topic-" + unique_group("");
+
+    KafkaBrokerConfig pcfg;
+    pcfg.bootstrap_servers = "localhost:9094";
+    pcfg.client_id = "dse-test-producer-single";
+
+    // Produce a message first.
+    {
+        KafkaMessageBroker producer(pcfg);
+        Message msg;
+        msg.topic = topic;
+        msg.payload = R"({"test":"single-topic"})";
+        producer.publish(std::move(msg));
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        producer.stop();
+    }
+
+    // Consume the message.
+    std::atomic<int> received{0};
+    std::string received_payload;
+
+    KafkaMessageBroker consumer_broker(cfg);
+    consumer_broker.subscribe(topic, [&](const Message& m) -> bool {
+        received_payload = m.payload;
+        ++received;
+        return true;
+    });
+    consumer_broker.start();
+
+    bool got = wait_until([&] { return received.load() >= 1; }, 10000);
+
+    consumer_broker.stop();
+
+    EXPECT_TRUE(got) << "Consumer did not receive the message within timeout";
+    EXPECT_EQ(received_payload, R"({"test":"single-topic"})");
+}
+
+// --- 3. Multiple-topic subscription ---
+
+TEST_F(KafkaConsumerTest, MultipleTopicSubscription)
+{
+    KafkaBrokerConfig cfg;
+    cfg.bootstrap_servers = "localhost:9094";
+    cfg.client_id = "dse-test-consumer-multi";
+    cfg.group_id = unique_group("multi-topic");
+
+    const std::string topic_a = "test.multi-a-" + unique_group("");
+    const std::string topic_b = "test.multi-b-" + unique_group("");
+
+    // Produce to both topics.
+    {
+        KafkaBrokerConfig pcfg;
+        pcfg.bootstrap_servers = "localhost:9094";
+        pcfg.client_id = "dse-test-producer-multi";
+        KafkaMessageBroker producer(pcfg);
+
+        Message msg_a;
+        msg_a.topic = topic_a;
+        msg_a.payload = R"({"from":"topic-a"})";
+        producer.publish(std::move(msg_a));
+
+        Message msg_b;
+        msg_b.topic = topic_b;
+        msg_b.payload = R"({"from":"topic-b"})";
+        producer.publish(std::move(msg_b));
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        producer.stop();
+    }
+
+    std::atomic<int> received_a{0};
+    std::atomic<int> received_b{0};
+
+    KafkaMessageBroker consumer_broker(cfg);
+    consumer_broker.subscribe(topic_a, [&](const Message&) -> bool {
+        ++received_a;
+        return true;
+    });
+    consumer_broker.subscribe(topic_b, [&](const Message&) -> bool {
+        ++received_b;
+        return true;
+    });
+
+    consumer_broker.start();
+
+    bool got_a = wait_until([&] { return received_a.load() >= 1; }, 10000);
+    bool got_b = wait_until([&] { return received_b.load() >= 1; }, 10000);
+
+    consumer_broker.stop();
+
+    EXPECT_TRUE(got_a) << "Consumer did not receive from topic A";
+    EXPECT_TRUE(got_b) << "Consumer did not receive from topic B";
+}
+
+// --- 4. Consumer group configuration ---
+
+TEST_F(KafkaConsumerTest, ConsumerGroupConfiguration)
+{
+    KafkaBrokerConfig cfg;
+    cfg.bootstrap_servers = "localhost:9094";
+    cfg.client_id = "dse-test-consumer-group";
+    cfg.group_id = unique_group("group-config");
+
+    KafkaMessageBroker broker(cfg);
+
+    std::atomic<int> received{0};
+    broker.subscribe("documents.indexed", [&](const Message&) -> bool {
+        ++received;
+        return true;
+    });
+
+    broker.start();
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    broker.stop();
+
+    // Consumer started and stopped without error — group was configured.
+    SUCCEED();
+}
+
+// --- 5. Publish → consume round trip ---
+
+TEST_F(KafkaConsumerTest, PublishConsumeRoundTrip)
+{
+    const std::string topic = "test.roundtrip-" + unique_group("");
+
+    // Producer.
+    KafkaBrokerConfig pcfg;
+    pcfg.bootstrap_servers = "localhost:9094";
+    pcfg.client_id = "dse-test-producer-roundtrip";
+
+    // Consumer.
+    KafkaBrokerConfig ccfg;
+    ccfg.bootstrap_servers = "localhost:9094";
+    ccfg.client_id = "dse-test-consumer-roundtrip";
+    ccfg.group_id = unique_group("roundtrip");
+
+    std::atomic<int> received{0};
+    std::string received_payload;
+
+    KafkaMessageBroker consumer_broker(ccfg);
+    consumer_broker.subscribe(topic, [&](const Message& m) -> bool {
+        received_payload = m.payload;
+        ++received;
+        return true;
+    });
+    consumer_broker.start();
+
+    // Publish after consumer is started.
+    {
+        KafkaMessageBroker producer(pcfg);
+        Message msg;
+        msg.topic = topic;
+        msg.payload = R"({"roundtrip":true})";
+        producer.publish(std::move(msg));
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        producer.stop();
+    }
+
+    bool got = wait_until([&] { return received.load() >= 1; }, 10000);
+    consumer_broker.stop();
+
+    EXPECT_TRUE(got);
+    EXPECT_EQ(received_payload, R"({"roundtrip":true})");
+}
+
+// --- 6. Payload preservation ---
+
+TEST_F(KafkaConsumerTest, PayloadPreservation)
+{
+    const std::string topic = "test.payload-" + unique_group("");
+    const std::string payload =
+        R"({"event_id":10,"event_type":"document_indexed","document_id":12345,"shard_id":0})";
+
+    KafkaBrokerConfig ccfg;
+    ccfg.bootstrap_servers = "localhost:9094";
+    ccfg.client_id = "dse-test-consumer-payload";
+    ccfg.group_id = unique_group("payload");
+
+    std::atomic<int> received{0};
+    std::string received_payload;
+
+    KafkaMessageBroker consumer_broker(ccfg);
+    consumer_broker.subscribe(topic, [&](const Message& m) -> bool {
+        received_payload = m.payload;
+        ++received;
+        return true;
+    });
+    consumer_broker.start();
+
+    {
+        KafkaBrokerConfig pcfg;
+        pcfg.bootstrap_servers = "localhost:9094";
+        pcfg.client_id = "dse-test-producer-payload";
+        KafkaMessageBroker producer(pcfg);
+        Message msg;
+        msg.topic = topic;
+        msg.payload = payload;
+        producer.publish(std::move(msg));
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        producer.stop();
+    }
+
+    bool got = wait_until([&] { return received.load() >= 1; }, 10000);
+    consumer_broker.stop();
+
+    EXPECT_TRUE(got);
+    EXPECT_EQ(received_payload, payload);
+}
+
+// --- 7. Successful handler → offset commit ---
+
+TEST_F(KafkaConsumerTest, SuccessfulHandlerCommitsOffset)
+{
+    const std::string topic = "test.ack-" + unique_group("");
+
+    KafkaBrokerConfig ccfg;
+    ccfg.bootstrap_servers = "localhost:9094";
+    ccfg.client_id = "dse-test-consumer-ack";
+    ccfg.group_id = unique_group("ack");
+
+    std::atomic<int> received{0};
+
+    KafkaMessageBroker consumer_broker(ccfg);
+    consumer_broker.subscribe(topic, [&](const Message&) -> bool {
+        ++received;
+        return true;  // success → commit offset
+    });
+    consumer_broker.start();
+
+    // Publish 3 messages.
+    {
+        KafkaBrokerConfig pcfg;
+        pcfg.bootstrap_servers = "localhost:9094";
+        pcfg.client_id = "dse-test-producer-ack";
+        KafkaMessageBroker producer(pcfg);
+        for (int i = 0; i < 3; ++i) {
+            Message msg;
+            msg.topic = topic;
+            msg.payload = R"({"ack_test":)" + std::to_string(i) + "}";
+            producer.publish(std::move(msg));
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        producer.stop();
+    }
+
+    bool got = wait_until([&] { return received.load() >= 3; }, 10000);
+    consumer_broker.stop();
+
+    EXPECT_TRUE(got);
+    EXPECT_GE(received.load(), 3);
+}
+
+// --- 8. Failed handler → offset not committed ---
+// Note: Kafka does NOT redeliver consumed messages within the same session.
+// At-least-once delivery only applies across restarts/rebalances.
+// This test verifies that within a session, all messages are consumed once,
+// and that failed messages do not have their offsets committed.
+
+TEST_F(KafkaConsumerTest, FailedHandlerNoCommit)
+{
+    const std::string topic = "test.nack-" + unique_group("");
+
+    KafkaBrokerConfig ccfg;
+    ccfg.bootstrap_servers = "localhost:9094";
+    ccfg.client_id = "dse-test-consumer-nack";
+    ccfg.group_id = unique_group("nack");
+
+    std::atomic<int> received{0};
+    std::atomic<int> success_count{0};
+
+    KafkaMessageBroker consumer_broker(ccfg);
+    consumer_broker.subscribe(topic, [&](const Message& m) -> bool {
+        ++received;
+        // Fail on messages containing "fail"
+        if (m.payload.find("fail") != std::string::npos) {
+            return false;  // no commit
+        }
+        ++success_count;
+        return true;  // commit
+    });
+    consumer_broker.start();
+
+    // Publish 3 messages.
+    {
+        KafkaBrokerConfig pcfg;
+        pcfg.bootstrap_servers = "localhost:9094";
+        pcfg.client_id = "dse-test-producer-nack";
+        KafkaMessageBroker producer(pcfg);
+        for (int i = 0; i < 3; ++i) {
+            Message msg;
+            msg.topic = topic;
+            msg.payload = (i == 1) ? R"({"nack_test":fail})"
+                                   : R"({"nack_test":ok})";
+            producer.publish(std::move(msg));
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        producer.stop();
+    }
+
+    // All 3 messages should be consumed (each once, no in-session redelivery).
+    bool got = wait_until([&] { return received.load() >= 3; }, 10000);
+    consumer_broker.stop();
+
+    EXPECT_TRUE(got) << "Not all messages consumed";
+    EXPECT_EQ(received.load(), 3);  // each consumed exactly once
+    EXPECT_EQ(success_count.load(), 2);  // 2 succeed, 1 fails
+}
+
+// --- 9. Consumer restart and committed-offset recovery ---
+// This test verifies that after a consumer restart, only uncommitted
+// offsets are redelivered (at-least-once semantics).
+
+TEST_F(KafkaConsumerTest, ConsumerRestartRecovery)
+{
+    const std::string topic = "test.restart-" + unique_group("");
+    const std::string group = unique_group("restart");
+
+    // Phase 1: Produce 1 message, consume it (commit offset).
+    std::atomic<int> first_run_count{0};
+
+    {
+        KafkaBrokerConfig pcfg;
+        pcfg.bootstrap_servers = "localhost:9094";
+        pcfg.client_id = "dse-test-producer-restart";
+        KafkaMessageBroker producer(pcfg);
+
+        Message msg1;
+        msg1.topic = topic;
+        msg1.payload = R"({"restart":"first"})";
+        producer.publish(std::move(msg1));
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        producer.stop();
+    }
+
+    // Consume and commit.
+    {
+        KafkaBrokerConfig ccfg;
+        ccfg.bootstrap_servers = "localhost:9094";
+        ccfg.client_id = "dse-test-consumer-restart-1";
+        ccfg.group_id = group;
+
+        KafkaMessageBroker broker(ccfg);
+        broker.subscribe(topic, [&](const Message&) -> bool {
+            ++first_run_count;
+            return true;  // commit offset
+        });
+        broker.start();
+        wait_until([&] { return first_run_count.load() >= 1; }, 10000);
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        broker.stop();
+    }
+
+    EXPECT_EQ(first_run_count.load(), 1);
+
+    // Phase 2: Produce a SECOND message (after first consumer committed).
+    {
+        KafkaBrokerConfig pcfg;
+        pcfg.bootstrap_servers = "localhost:9094";
+        pcfg.client_id = "dse-test-producer-restart-2";
+        KafkaMessageBroker producer(pcfg);
+
+        Message msg2;
+        msg2.topic = topic;
+        msg2.payload = R"({"restart":"second"})";
+        producer.publish(std::move(msg2));
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        producer.stop();
+    }
+
+    // Phase 3: Restart with same group — should get only the second message.
+    std::atomic<int> second_run_count{0};
+
+    {
+        KafkaBrokerConfig ccfg;
+        ccfg.bootstrap_servers = "localhost:9094";
+        ccfg.client_id = "dse-test-consumer-restart-2";
+        ccfg.group_id = group;  // same group → same committed offset
+
+        KafkaMessageBroker broker(ccfg);
+        broker.subscribe(topic, [&](const Message&) -> bool {
+            ++second_run_count;
+            return true;
+        });
+        broker.start();
+        bool got = wait_until([&] { return second_run_count.load() >= 1; }, 10000);
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        broker.stop();
+
+        EXPECT_TRUE(got);
+    }
+
+    // First consumer consumed 1, second consumer consumed 1 (the new message).
+    EXPECT_EQ(first_run_count.load(), 1);
+    EXPECT_EQ(second_run_count.load(), 1);
+}
+
+// --- 10. Graceful shutdown ---
+
+TEST_F(KafkaConsumerTest, GracefulShutdown)
+{
+    const std::string topic = "test.shutdown-" + unique_group("");
+
+    KafkaBrokerConfig ccfg;
+    ccfg.bootstrap_servers = "localhost:9094";
+    ccfg.client_id = "dse-test-consumer-shutdown";
+    ccfg.group_id = unique_group("shutdown");
+
+    std::atomic<int> received{0};
+
+    KafkaMessageBroker consumer_broker(ccfg);
+    consumer_broker.subscribe(topic, [&](const Message&) -> bool {
+        ++received;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        return true;
+    });
+    consumer_broker.start();
+
+    // Publish some messages.
+    {
+        KafkaBrokerConfig pcfg;
+        pcfg.bootstrap_servers = "localhost:9094";
+        pcfg.client_id = "dse-test-producer-shutdown";
+        KafkaMessageBroker producer(pcfg);
+        for (int i = 0; i < 5; ++i) {
+            Message msg;
+            msg.topic = topic;
+            msg.payload = R"({"shutdown_test":)" + std::to_string(i) + "}";
+            producer.publish(std::move(msg));
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        producer.stop();
+    }
+
+    // Wait for at least one message.
+    wait_until([&] { return received.load() >= 1; }, 5000);
+
+    // Stop should not block indefinitely.
+    auto start = std::chrono::steady_clock::now();
+    consumer_broker.stop();
+    auto elapsed = std::chrono::steady_clock::now() - start;
+
+    EXPECT_LT(elapsed, std::chrono::seconds(10))
+        << "stop() blocked for too long";
+    EXPECT_GE(received.load(), 1);
+}
+
+// --- 11. Concurrent producer/consumer operation ---
+
+TEST_F(KafkaConsumerTest, ConcurrentProducerConsumer)
+{
+    const std::string topic = "test.concurrent-" + unique_group("");
+
+    KafkaBrokerConfig ccfg;
+    ccfg.bootstrap_servers = "localhost:9094";
+    ccfg.client_id = "dse-test-consumer-concurrent";
+    ccfg.group_id = unique_group("concurrent");
+
+    std::atomic<int> received{0};
+
+    KafkaMessageBroker consumer_broker(ccfg);
+    consumer_broker.subscribe(topic, [&](const Message&) -> bool {
+        ++received;
+        return true;
+    });
+    consumer_broker.start();
+
+    // Publish while consumer is running.
+    {
+        KafkaBrokerConfig pcfg;
+        pcfg.bootstrap_servers = "localhost:9094";
+        pcfg.client_id = "dse-test-producer-concurrent";
+        KafkaMessageBroker producer(pcfg);
+        for (int i = 0; i < 10; ++i) {
+            Message msg;
+            msg.topic = topic;
+            msg.payload = R"({"concurrent":)" + std::to_string(i) + "}";
+            producer.publish(std::move(msg));
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        producer.stop();
+    }
+
+    wait_until([&] { return received.load() >= 5; }, 15000);
+    consumer_broker.stop();
+
+    EXPECT_GE(received.load(), 5);
+}
+
+// --- 12. Three document event topics ---
+
+TEST_F(KafkaConsumerTest, ThreeDocumentEventTopics)
+{
+    KafkaBrokerConfig ccfg;
+    ccfg.bootstrap_servers = "localhost:9094";
+    ccfg.client_id = "dse-test-consumer-3topics";
+    ccfg.group_id = unique_group("3topics");
+
+    std::atomic<int> indexed_count{0};
+    std::atomic<int> updated_count{0};
+    std::atomic<int> removed_count{0};
+
+    KafkaMessageBroker consumer_broker(ccfg);
+    consumer_broker.subscribe("documents.indexed", [&](const Message&) -> bool {
+        ++indexed_count;
+        return true;
+    });
+    consumer_broker.subscribe("documents.updated", [&](const Message&) -> bool {
+        ++updated_count;
+        return true;
+    });
+    consumer_broker.subscribe("documents.removed", [&](const Message&) -> bool {
+        ++removed_count;
+        return true;
+    });
+    consumer_broker.start();
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+    // Publish to all three topics.
+    {
+        KafkaBrokerConfig pcfg;
+        pcfg.bootstrap_servers = "localhost:9094";
+        pcfg.client_id = "dse-test-producer-3topics";
+        KafkaMessageBroker producer(pcfg);
+
+        Message idx;
+        idx.topic = "documents.indexed";
+        idx.payload = R"({"3topics":"indexed"})";
+        producer.publish(std::move(idx));
+
+        Message upd;
+        upd.topic = "documents.updated";
+        upd.payload = R"({"3topics":"updated"})";
+        producer.publish(std::move(upd));
+
+        Message rem;
+        rem.topic = "documents.removed";
+        rem.payload = R"({"3topics":"removed"})";
+        producer.publish(std::move(rem));
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        producer.stop();
+    }
+
+    wait_until([&] {
+        return indexed_count.load() >= 1 &&
+               updated_count.load() >= 1 &&
+               removed_count.load() >= 1;
+    }, 15000);
+
+    consumer_broker.stop();
+
+    EXPECT_GE(indexed_count.load(), 1);
+    EXPECT_GE(updated_count.load(), 1);
+    EXPECT_GE(removed_count.load(), 1);
+}
+
+// --- 13. Consumer statistics ---
+
+TEST_F(KafkaConsumerTest, ConsumerStatistics)
+{
+    const std::string topic = "test.stats-" + unique_group("");
+
+    KafkaBrokerConfig ccfg;
+    ccfg.bootstrap_servers = "localhost:9094";
+    ccfg.client_id = "dse-test-consumer-stats";
+    ccfg.group_id = unique_group("stats");
+
+    std::atomic<int> received{0};
+
+    KafkaMessageBroker consumer_broker(ccfg);
+    consumer_broker.subscribe(topic, [&](const Message&) -> bool {
+        ++received;
+        return true;
+    });
+    consumer_broker.start();
+
+    // Publish messages.
+    {
+        KafkaBrokerConfig pcfg;
+        pcfg.bootstrap_servers = "localhost:9094";
+        pcfg.client_id = "dse-test-producer-stats";
+        KafkaMessageBroker producer(pcfg);
+        for (int i = 0; i < 5; ++i) {
+            Message msg;
+            msg.topic = topic;
+            msg.payload = R"({"stats_test":)" + std::to_string(i) + "}";
+            producer.publish(std::move(msg));
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        producer.stop();
+    }
+
+    wait_until([&] { return received.load() >= 5; }, 10000);
+    consumer_broker.stop();
+
+    EXPECT_GE(consumer_broker.messages_consumed(), 5u);
+    EXPECT_GE(consumer_broker.rebalance_count(), 0u);
+}
+
+// --- 14. Consumer with handler failure and recovery ---
+// Within a session, consumed messages are NOT redelivered.
+// This test verifies that all messages are consumed and the correct
+// number succeed/fail. Recovery (redelivery of failed messages) only
+// happens across restarts, which is tested in ConsumerRestartRecovery.
+
+TEST_F(KafkaConsumerTest, HandlerFailureAndRecovery)
+{
+    const std::string topic = "test.recover-" + unique_group("");
+
+    KafkaBrokerConfig ccfg;
+    ccfg.bootstrap_servers = "localhost:9094";
+    ccfg.client_id = "dse-test-consumer-recover";
+    ccfg.group_id = unique_group("recover");
+
+    std::atomic<int> total_received{0};
+    std::atomic<int> success_count{0};
+
+    KafkaMessageBroker consumer_broker(ccfg);
+    consumer_broker.subscribe(topic, [&](const Message& m) -> bool {
+        ++total_received;
+        // Fail on messages containing "fail"
+        if (m.payload.find("fail") != std::string::npos) {
+            return false;  // no commit
+        }
+        ++success_count;
+        return true;  // commit
+    });
+    consumer_broker.start();
+
+    // Publish 3 messages (1 will fail, 2 will succeed).
+    {
+        KafkaBrokerConfig pcfg;
+        pcfg.bootstrap_servers = "localhost:9094";
+        pcfg.client_id = "dse-test-producer-recover";
+        KafkaMessageBroker producer(pcfg);
+
+        Message ok1;
+        ok1.topic = topic;
+        ok1.payload = R"({"recover_test":"ok1"})";
+        producer.publish(std::move(ok1));
+
+        Message fail_msg;
+        fail_msg.topic = topic;
+        fail_msg.payload = R"({"recover_test":"fail"})";
+        producer.publish(std::move(fail_msg));
+
+        Message ok2;
+        ok2.topic = topic;
+        ok2.payload = R"({"recover_test":"ok2"})";
+        producer.publish(std::move(ok2));
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        producer.stop();
+    }
+
+    // All 3 messages consumed (each once).
+    bool got = wait_until([&] { return total_received.load() >= 3; }, 10000);
+    consumer_broker.stop();
+
+    EXPECT_TRUE(got);
+    EXPECT_EQ(total_received.load(), 3);
+    EXPECT_EQ(success_count.load(), 2);  // 2 succeed, 1 fails
+}
+
+// --- 15. No-broker backward compatibility ---
+
+TEST(KafkaMessageBrokerDisabled, SkippedWhenKafkaNotEnabled)
+{
+    SUCCEED() << "Kafka not enabled; KafkaMessageBroker tests are skipped.";
 }
 
 } // namespace

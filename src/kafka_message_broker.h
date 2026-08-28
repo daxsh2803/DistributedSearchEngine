@@ -1,8 +1,7 @@
-// Distributed Search Engine - Kafka Message Broker (Phase 19C).
+// Distributed Search Engine - Kafka Message Broker (Phase 19C/19D).
 //
-// Concrete MessageBroker implementation backed by Kafka via KafkaClient.
-// EventDispatcher programs against the MessageBroker interface; it does
-// not know whether it is using InMemoryMessageBroker or KafkaMessageBroker.
+// Concrete MessageBroker implementation backed by Kafka via KafkaClient
+// (producer) and KafkaConsumer (consumer groups).
 //
 // Architecture:
 //
@@ -12,72 +11,95 @@
 //       v
 //   KafkaMessageBroker
 //       |
-//       | produce_async(topic, payload, key)
-//       v
-//   KafkaClient
+//       ├── KafkaClient (Phase 19B — producer)
+//       |       └── librdkafka Producer
 //       |
-//       | librdkafka C++ API
-//       v
-//   Kafka broker
+//       └── KafkaConsumer (Phase 19D — consumer groups)
+//               └── librdkafka KafkaConsumer
 //
-// Publish semantics:
+// Publish semantics (Phase 19C):
 //   publish() maps to KafkaClient::produce_async().
 //   "Accepted into librdkafka's producer queue" = success.
-//   This is consistent with InMemoryMessageBroker: publish() returns
-//   after the message is accepted into a local queue, NOT after the
-//   end consumer has processed it.
+//   This is consistent with InMemoryMessageBroker.
 //
-// Poll thread:
+// Consumer semantics (Phase 19D):
+//   subscribe() registers a handler per topic.
+//   start() launches a consumer thread that polls KafkaConsumer.
+//   Messages are dispatched to the registered handler.
+//   Manual offset commits after successful handler execution.
+//   At-least-once delivery: failed handlers do NOT commit offsets.
+//
+// Poll thread (producer, Phase 19C):
 //   A dedicated thread calls KafkaClient::poll() periodically to
-//   process delivery reports. The thread is started lazily on the
-//   first publish() and joined during stop().
+//   process delivery reports.
 //
-// Consumer methods:
-//   subscribe/start/queue_size/dead_letters/was_processed are minimal
-//   stubs. Kafka consumer groups are NOT part of Phase 19C; they
-//   belong to Phase 19D.
+// Consumer thread (Phase 19D):
+//   A dedicated thread calls KafkaConsumer::poll() in a loop,
+//   dispatching messages to registered handlers.
 //
-// Thread safety:
-//   publish() and publish_with_timeout() are safe for concurrent calls.
-//   stop() and the destructor are safe for single-threaded invocation
-//   after all publishers have quiesced.
+// Threading:
+//   publish() / publish_with_timeout() are safe for concurrent calls.
+//   Consumer thread handles consumption sequentially.
+//   stop() is idempotent and joins all threads.
 //
 // Lifecycle:
-//   construct -> start (optional, starts poll thread) ->
-//   publish ... -> stop -> destructor
+//   construct -> subscribe() -> start() ->
+//   publish/consume ... -> stop() -> destructor
 //   stop() is idempotent. Destructor calls stop() if not already stopped.
 //
 // Ownership:
-//   KafkaMessageBroker owns its KafkaClient through RAII.
-//   The KafkaClient owns the librdkafka producer handle.
+//   KafkaMessageBroker owns KafkaClient and KafkaConsumer through RAII.
+//   Handlers are stored by value (std::function) — no external ownership.
 
 #pragma once
 
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
+#include <vector>
 
 #include "message.h"
 #include "message_broker.h"
 
 namespace dse {
 
-class KafkaClient;  // forward declare — Pimpl hides librdkafka
+class KafkaClient;       // forward declare — Pimpl hides librdkafka producer
+class KafkaConsumer;     // forward declare — Pimpl hides librdkafka consumer
 
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 
 struct KafkaBrokerConfig {
-    // Kafka broker connection.
+    // Kafka broker connection (shared by producer and consumer).
     std::string bootstrap_servers = "localhost:9094";
     std::string client_id = "dse-kafka-broker";
 
-    // Poll thread interval in milliseconds.
+    // Producer poll thread interval in milliseconds.
     int poll_interval_ms = 50;
+
+    // --- Consumer group configuration (Phase 19D) ---
+
+    // Consumer group ID. All KafkaMessageBroker instances sharing the
+    // same group.id will coordinate partition assignment.
+    std::string group_id = "dse-consumer-group";
+
+    // Consumer client ID.
+    std::string consumer_client_id = "dse-consumer";
+
+    // Auto offset reset policy when no committed offset exists.
+    // "earliest": consume from the beginning.
+    // "latest": consume only new messages.
+    std::string auto_offset_reset = "earliest";
+
+    // Consumer poll timeout in milliseconds.
+    int consumer_poll_timeout_ms = 100;
 
     KafkaBrokerConfig() = default;
 };
@@ -89,10 +111,9 @@ struct KafkaBrokerConfig {
 class KafkaMessageBroker : public MessageBroker {
 public:
     // Create a Kafka message broker with the given configuration.
-    // Constructs the KafkaClient internally.
     explicit KafkaMessageBroker(KafkaBrokerConfig config = {});
 
-    // Destructor stops the poll thread, flushes, and closes the client.
+    // Destructor stops all threads, flushes, and closes handles.
     ~KafkaMessageBroker() override;
 
     // Non-copyable, non-movable (owns threads and Kafka handles).
@@ -103,13 +124,18 @@ public:
 
     // --- MessageBroker interface -----------------------------------------
 
+    // Producer: publish a message to its topic.
     Offset publish(Message message) override;
     std::optional<Offset> publish_with_timeout(
         Message message, std::size_t timeout_ms) override;
 
-    // Consumer-side: minimal stubs (consumer groups deferred to Phase 19D).
+    // Consumer: register a handler for a topic. Must be called before start().
     void subscribe(const Topic& topic, MessageHandler handler) override;
+
+    // Start producer poll thread and consumer thread(s).
     void start() override;
+
+    // Graceful shutdown: stop consumer, stop producer, flush, close.
     void stop() override;
 
     std::size_t queue_size(const Topic& topic) const override;
@@ -125,22 +151,42 @@ public:
     // Number of delivery reports received since construction.
     std::uint64_t delivery_reports_count() const;
 
+    // Number of messages consumed since construction.
+    std::uint64_t messages_consumed() const;
+
+    // Number of rebalance events since construction.
+    std::uint64_t rebalance_count() const;
+
 private:
-    // Poll thread loop: calls client_->poll() periodically.
+    // Producer poll thread loop: calls client_->poll() periodically.
     void poll_loop();
 
-    // Start the poll thread (called lazily on first publish).
+    // Start the producer poll thread (called lazily on first publish).
     void ensure_poll_thread_started();
+
+    // Consumer thread loop: polls KafkaConsumer and dispatches to handlers.
+    void consumer_loop();
 
     // --- Configuration ---
     KafkaBrokerConfig config_;
 
-    // --- Kafka client (owned) ---
+    // --- Kafka producer (owned) ---
     std::unique_ptr<KafkaClient> client_;
 
-    // --- Poll thread ---
+    // --- Kafka consumer (owned, Phase 19D) ---
+    std::unique_ptr<KafkaConsumer> consumer_;
+
+    // --- Producer poll thread ---
     std::thread poll_thread_;
     std::atomic<bool> poll_running_{false};
+
+    // --- Consumer thread (Phase 19D) ---
+    std::thread consumer_thread_;
+    std::atomic<bool> consumer_running_{false};
+
+    // --- Consumer handlers (set before start, read-only after) ---
+    std::mutex handler_mutex_;
+    std::unordered_map<std::string, MessageHandler> handlers_;
 
     // --- Offset counter (atomic, monotonic) ---
     std::atomic<std::uint64_t> next_offset_{0};
@@ -148,6 +194,9 @@ private:
     // --- Statistics (atomic for lock-free reads) ---
     std::atomic<std::uint64_t> messages_published_{0};
     std::atomic<std::uint64_t> messages_failed_{0};
+    std::atomic<std::uint64_t> messages_consumed_{0};
+    std::atomic<std::uint64_t> messages_acked_{0};
+    std::atomic<std::uint64_t> messages_nacked_{0};
 };
 
 } // namespace dse

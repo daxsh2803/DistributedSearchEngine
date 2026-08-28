@@ -102,7 +102,7 @@ add_library(dse_core STATIC
     src/event_store.cpp
     src/persistent_event_store.cpp)
 if(ENABLE_KAFKA)
-    target_sources(dse_core PRIVATE src/kafka_client.cpp src/kafka_message_broker.cpp)
+    target_sources(dse_core PRIVATE src/kafka_client.cpp src/kafka_consumer.cpp src/kafka_message_broker.cpp)
 endif()
 target_include_directories(dse_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_options(dse_core PRIVATE ${PROJECT_WARNINGS})
