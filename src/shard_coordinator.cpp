@@ -489,13 +489,16 @@ CoordinatorIngestResponse ShardCoordinator::ingest(
 
     // Publish domain event on success (one event per logical operation).
     if (!response.is_error && dispatcher_) {
-        const std::size_t shard_id = router_->route(request.id);
-        DocumentIndexedEvent idx_event{0, request.id, shard_id};
+        // Phase 19E: include source_node_id and document content so
+        // remote consumers can apply the mutation locally.
+        // Use the primary node for this shard as the source.
+        // This is the node that owns the shard and performed the mutation.
+        const std::size_t source_node = node_for_shard(shard_id).node_id();
+        DocumentIndexedEvent idx_event{0, request.id, shard_id,
+                                       source_node, request.content};
         if (event_store_) {
-            // Create event in store to get stable ID.
             idx_event.event_id = event_store_->create_event(
                 topics::kDocumentIndexed, "");
-            // Serialize with the real event_id.
             const std::string payload = event_json::to_json(idx_event);
             dispatcher_->enqueue_with_event(
                 idx_event.event_id, topics::kDocumentIndexed, payload);
@@ -593,8 +596,9 @@ CoordinatorUpdateResponse ShardCoordinator::update(
 
     // Publish domain event on success (one event per logical operation).
     if (!response.is_error && dispatcher_) {
-        const std::size_t shard_id = router_->route(request.id);
-        DocumentUpdatedEvent upd_event{0, request.id, shard_id};
+        const std::size_t source_node = node_for_shard(shard_id).node_id();
+        DocumentUpdatedEvent upd_event{0, request.id, shard_id,
+                                       source_node, request.content};
         if (event_store_) {
             upd_event.event_id = event_store_->create_event(
                 topics::kDocumentUpdated, "");
@@ -659,8 +663,8 @@ CoordinatorDeleteResponse ShardCoordinator::remove(doc_id id)
 
     // Publish domain event on success (one event per logical operation).
     if (!response.is_error && dispatcher_) {
-        const std::size_t shard_id = router_->route(id);
-        DocumentRemovedEvent rm_event{0, id, shard_id};
+        const std::size_t source_node = node_for_shard(shard_id).node_id();
+        DocumentRemovedEvent rm_event{0, id, shard_id, source_node};
         if (event_store_) {
             rm_event.event_id = event_store_->create_event(
                 topics::kDocumentRemoved, "");

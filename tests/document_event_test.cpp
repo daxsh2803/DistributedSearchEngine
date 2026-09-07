@@ -105,7 +105,7 @@ std::unique_ptr<ShardCoordinator> make_coord_r2(
 
 TEST(DocumentEventTest, IndexedEventSerialization)
 {
-    DocumentIndexedEvent event{42, 3, 0};
+    DocumentIndexedEvent event{42, 3, 0, 0, ""};
     const std::string json = event_json::to_json(event);
 
     auto j = nlohmann::json::parse(json);
@@ -117,7 +117,7 @@ TEST(DocumentEventTest, IndexedEventSerialization)
 
 TEST(DocumentEventTest, UpdatedEventSerialization)
 {
-    DocumentUpdatedEvent event{7, 1, 2};
+    DocumentUpdatedEvent event{7, 1, 2, 0, ""};
     const std::string json = event_json::to_json(event);
 
     auto j = nlohmann::json::parse(json);
@@ -129,7 +129,7 @@ TEST(DocumentEventTest, UpdatedEventSerialization)
 
 TEST(DocumentEventTest, RemovedEventSerialization)
 {
-    DocumentRemovedEvent event{99, 5, 1};
+    DocumentRemovedEvent event{99, 5, 1, 0};
     const std::string json = event_json::to_json(event);
 
     auto j = nlohmann::json::parse(json);

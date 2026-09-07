@@ -251,4 +251,101 @@ bool LocalNode::load_shard(std::size_t shard_id)
     return shard->load();
 }
 
+// ---------------------------------------------------------------------------
+// Remote mutation APIs (Phase 19E)
+// ---------------------------------------------------------------------------
+
+bool LocalNode::apply_remote_indexed(std::size_t shard_id, doc_id document_id,
+                                      const std::string& content, bool* applied)
+{
+    if (applied) {
+        *applied = false;
+    }
+    Shard* shard = find_shard(shard_id);
+    if (!shard) {
+        return false;
+    }
+    // Idempotent INDEX: if the document already exists with the same
+    // content, treat as success (no-op). This prevents infinite Kafka
+    // redelivery of duplicate INDEX events.
+    // If the document exists with DIFFERENT content, that is a genuine
+    // conflict and we return false so Kafka will redeliver (the caller
+    // must decide how to resolve).
+    if (shard->contains_document(document_id)) {
+        auto existing = shard->get_document(document_id);
+        if (existing && existing->content == content) {
+            return true;  // idempotent no-op
+        }
+        return false;  // content mismatch — conflict
+    }
+    // Direct shard mutation: no event publication, no replication.
+    // Persist via Shard::save() (safe: save() does not publish events).
+    const bool added = shard->add_document(document_id, content);
+    if (added) {
+        shard->save();
+        if (applied) {
+            *applied = true;
+        }
+    }
+    return added;
+}
+
+bool LocalNode::apply_remote_updated(std::size_t shard_id, doc_id document_id,
+                                      const std::string& content, bool* applied)
+{
+    if (applied) {
+        *applied = false;
+    }
+    Shard* shard = find_shard(shard_id);
+    if (!shard) {
+        return false;
+    }
+    auto existing = shard->get_document(document_id);
+    if (!existing) {
+        // Document does not exist — genuine failure.
+        // Return false so Kafka redelivers (INDEX event may arrive later).
+        return false;
+    }
+    // Idempotent UPDATE: if the document already has identical content,
+    // treat as success (no-op).
+    if (existing->content == content) {
+        return true;  // idempotent no-op
+    }
+    // Document exists with different content — apply the update.
+    const bool updated = shard->update_document(document_id, content);
+    if (updated) {
+        shard->save();
+        if (applied) {
+            *applied = true;
+        }
+    }
+    return updated;
+}
+
+bool LocalNode::apply_remote_removed(std::size_t shard_id, doc_id document_id,
+                                      bool* applied)
+{
+    if (applied) {
+        *applied = false;
+    }
+    Shard* shard = find_shard(shard_id);
+    if (!shard) {
+        return false;
+    }
+    // Idempotent REMOVE: if the document is already absent, treat as
+    // success (no-op). This prevents infinite Kafka redelivery of
+    // duplicate REMOVE events.
+    if (!shard->contains_document(document_id)) {
+        return true;  // already absent — idempotent no-op
+    }
+    const bool removed = shard->remove_document(document_id);
+    if (removed) {
+        shard->save();
+        if (applied) {
+            *applied = true;
+        }
+    }
+    return removed;
+}
+
 } // namespace dse

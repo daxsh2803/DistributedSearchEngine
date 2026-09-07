@@ -88,6 +88,13 @@ struct KafkaBrokerConfig {
 
     // Consumer group ID. All KafkaMessageBroker instances sharing the
     // same group.id will coordinate partition assignment.
+    //
+    // For distributed deployments, each node should use a node-specific
+    // group ID (e.g. "dse-node-0", "dse-node-1") so that every node
+    // receives the full event stream independently.
+    //
+    // If left as the default, the application must override it before
+    // constructing KafkaMessageBroker (typically in main.cpp).
     std::string group_id = "dse-consumer-group";
 
     // Consumer client ID.

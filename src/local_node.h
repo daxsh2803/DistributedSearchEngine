@@ -48,6 +48,22 @@ public:
     bool save_shard(std::size_t shard_id) override;
     bool load_shard(std::size_t shard_id) override;
 
+    // --- Remote mutation APIs (Phase 19E) ---
+    // Apply document mutations received from Kafka without triggering
+    // event publication, replication, or coordinator intervention.
+    // If applied != nullptr, it is set to true if a local mutation was applied,
+    // or false if the operation was an idempotent no-op.
+    // Returns true on success (applied or no-op), false if the shard is not hosted
+    // or the operation fails (e.g. conflict, missing document).
+    bool apply_remote_indexed(std::size_t shard_id, doc_id document_id,
+                              const std::string& content,
+                              bool* applied = nullptr);
+    bool apply_remote_updated(std::size_t shard_id, doc_id document_id,
+                              const std::string& content,
+                              bool* applied = nullptr);
+    bool apply_remote_removed(std::size_t shard_id, doc_id document_id,
+                              bool* applied = nullptr);
+
 private:
     // Locate a shard by id, or return nullptr.
     Shard* find_shard(std::size_t shard_id);

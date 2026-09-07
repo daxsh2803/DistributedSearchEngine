@@ -18,7 +18,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     set(PROJECT_WARNINGS -Wall -Wextra -Wpedantic)
 elseif(MSVC)
-    set(PROJECT_WARNINGS /W4)
+    set(PROJECT_WARNINGS /W4 /utf-8)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -100,7 +100,8 @@ add_library(dse_core STATIC
     src/document_event.cpp
     src/event_dispatcher.cpp
     src/event_store.cpp
-    src/persistent_event_store.cpp)
+    src/persistent_event_store.cpp
+    src/remote_event_processor.cpp)
 if(ENABLE_KAFKA)
     target_sources(dse_core PRIVATE src/kafka_client.cpp src/kafka_consumer.cpp src/kafka_message_broker.cpp)
 endif()
@@ -363,6 +364,11 @@ if(BUILD_TESTING)
     target_compile_options(event_integration_test PRIVATE ${PROJECT_WARNINGS})
     target_link_libraries(event_integration_test PRIVATE GTest::gtest_main dse_core)
     gtest_discover_tests(event_integration_test)
+
+    add_executable(remote_event_processor_test tests/remote_event_processor_test.cpp)
+    target_compile_options(remote_event_processor_test PRIVATE ${PROJECT_WARNINGS})
+    target_link_libraries(remote_event_processor_test PRIVATE GTest::gtest_main dse_core)
+    gtest_discover_tests(remote_event_processor_test)
 
     if(ENABLE_KAFKA)
         add_executable(kafka_client_test tests/kafka_client_test.cpp)

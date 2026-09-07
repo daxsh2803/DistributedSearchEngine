@@ -35,6 +35,8 @@ struct DocumentIndexedEvent {
     EventId event_id = 0;
     doc_id document_id = 0;
     std::size_t shard_id = 0;
+    std::size_t source_node_id = 0;    // Phase 19E: originating node
+    std::string document_content;        // Phase 19E: document payload for remote processing
 };
 
 // Document successfully updated.
@@ -42,6 +44,8 @@ struct DocumentUpdatedEvent {
     EventId event_id = 0;
     doc_id document_id = 0;
     std::size_t shard_id = 0;
+    std::size_t source_node_id = 0;    // Phase 19E: originating node
+    std::string document_content;        // Phase 19E: updated document payload
 };
 
 // Document successfully removed.
@@ -49,6 +53,7 @@ struct DocumentRemovedEvent {
     EventId event_id = 0;
     doc_id document_id = 0;
     std::size_t shard_id = 0;
+    std::size_t source_node_id = 0;    // Phase 19E: originating node
 };
 
 // ---------------------------------------------------------------------------
@@ -75,6 +80,14 @@ std::string to_json(const DocumentUpdatedEvent& event);
 
 // Serialize DocumentRemovedEvent to a JSON payload string.
 std::string to_json(const DocumentRemovedEvent& event);
+
+// --- Deserialization (Phase 19E) ---
+// Parse a JSON payload string into the corresponding event struct.
+// Returns true on success, false if the JSON is malformed or missing
+// required fields.
+bool from_json(const std::string& json_str, DocumentIndexedEvent& event);
+bool from_json(const std::string& json_str, DocumentUpdatedEvent& event);
+bool from_json(const std::string& json_str, DocumentRemovedEvent& event);
 
 } // namespace event_json
 

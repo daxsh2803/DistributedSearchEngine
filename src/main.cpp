@@ -33,6 +33,12 @@
 #include "shard_coordinator.h"
 #include "shard_router.h"
 
+#ifdef DSE_KAFKA_ENABLED
+#include "document_event.h"
+#include "kafka_message_broker.h"
+#include "remote_event_processor.h"
+#endif
+
 #include <atomic>
 #include <csignal>
 #include <cstdlib>
@@ -182,6 +188,9 @@ int main(int argc, char* argv[])
         node->add_shard(i, std::make_unique<dse::Shard>(path));
     }
 
+    [[maybe_unused]] auto* local_node_ptr = node.get();
+    [[maybe_unused]] const std::size_t local_node_id = local_node_ptr->node_id();
+
     std::vector<std::unique_ptr<dse::NodeClient>> nodes;
     nodes.push_back(std::move(node));
 
@@ -193,7 +202,53 @@ int main(int argc, char* argv[])
     // Recovers PENDING/FAILED events from previous runs on construction.
     dse::PersistentEventStore eventStore(data_dir + "events");
 
-    // InMemoryMessageBroker: at-least-once delivery with retry support.
+    // --- Create coordinator FIRST (before broker) so we can use node_id ---
+    auto coordinator = std::make_unique<dse::ShardCoordinator>(
+        std::move(router), std::move(shard_placement), std::move(nodes));
+    coordinator->set_metrics(&metrics);
+    coordinator->set_event_store(&eventStore);
+
+    // --- Create event broker (Kafka-aware when DSE_KAFKA_ENABLED) ---
+#ifdef DSE_KAFKA_ENABLED
+    // Kafka path: node-specific consumer group so each node receives
+    // the full event stream independently.
+    dse::KafkaBrokerConfig kafkaConfig;
+    kafkaConfig.bootstrap_servers = "localhost:9094";
+    kafkaConfig.client_id = "dse-producer";
+    kafkaConfig.group_id = "dse-node-" + std::to_string(local_node_id);
+    kafkaConfig.consumer_client_id = "dse-consumer-" + std::to_string(local_node_id);
+    kafkaConfig.auto_offset_reset = "earliest";
+
+    // RemoteEventProcessor: applies remote mutations from Kafka.
+    // Declared before broker so it outlives the consumer thread (strict RAII).
+    // Own node ID = this node's ID so self-events are skipped.
+    std::unordered_map<std::size_t, dse::LocalNode*> node_map;
+    node_map[local_node_id] = local_node_ptr;
+    dse::RemoteEventProcessor remoteProcessor(std::move(node_map), local_node_id);
+
+    dse::KafkaMessageBroker broker(kafkaConfig);
+
+    // Register handlers for the three document-event topics.
+    broker.subscribe(dse::topics::kDocumentIndexed,
+        [&remoteProcessor](const dse::Message& msg) {
+            return remoteProcessor.process(msg.topic, msg.payload);
+        });
+    broker.subscribe(dse::topics::kDocumentUpdated,
+        [&remoteProcessor](const dse::Message& msg) {
+            return remoteProcessor.process(msg.topic, msg.payload);
+        });
+    broker.subscribe(dse::topics::kDocumentRemoved,
+        [&remoteProcessor](const dse::Message& msg) {
+            return remoteProcessor.process(msg.topic, msg.payload);
+        });
+
+    // EventDispatcher: bounded async dispatch with retry support.
+    dse::EventDispatcher::Config dispatcherConfig;
+    dispatcherConfig.max_retries = 3;
+    dispatcherConfig.retry_delay_ms = 100;
+    dse::EventDispatcher dispatcher(broker, eventStore, dispatcherConfig);
+#else
+    // In-memory path (Phase 18): preserved for Kafka-disabled builds.
     dse::BrokerConfig brokerConfig;
     brokerConfig.max_queue_size = 4096;
     brokerConfig.consumer_threads = 2;
@@ -205,12 +260,8 @@ int main(int argc, char* argv[])
     dispatcherConfig.max_retries = 3;
     dispatcherConfig.retry_delay_ms = 100;
     dse::EventDispatcher dispatcher(broker, eventStore, dispatcherConfig);
+#endif
 
-    // --- Create coordinator ---
-    auto coordinator = std::make_unique<dse::ShardCoordinator>(
-        std::move(router), std::move(shard_placement), std::move(nodes));
-    coordinator->set_metrics(&metrics);
-    coordinator->set_event_store(&eventStore);
     coordinator->set_event_dispatcher(&dispatcher);
 
     // --- Startup recovery: load persisted documents or seed corpus ---
@@ -241,7 +292,9 @@ int main(int argc, char* argv[])
 
     // --- Start the event system ---
     dispatcher.start();
+#ifdef DSE_KAFKA_ENABLED
     broker.start();
+#endif
     std::cout << "Event system started\n";
 
     // --- Start the HTTP server ---
@@ -277,8 +330,10 @@ int main(int argc, char* argv[])
     dispatcher.stop();
     // 2. Persist any remaining events to disk
     eventStore.flush();
-    // 3. Stop the message broker
+    // 3. Stop the message broker (Kafka consumer + producer, or in-memory)
+#ifdef DSE_KAFKA_ENABLED
     broker.stop();
+#endif
 
     std::cout << "\nServer stopped.\n";
     return 0;
