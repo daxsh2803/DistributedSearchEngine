@@ -68,6 +68,7 @@ public:
     std::optional<Offset> publish_with_timeout(
         Message message, std::size_t timeout_ms) override;
     void subscribe(const Topic& topic, MessageHandler handler) override;
+    void set_delivery_callback(DeliveryCallback cb) override { delivery_callback_ = std::move(cb); }
     void start() override;
     void stop() override;
     std::size_t queue_size(const Topic& topic) const override;
@@ -115,6 +116,9 @@ private:
     std::atomic<std::uint64_t> messages_acknowledged_{0};
     std::atomic<std::uint64_t> messages_retried_{0};
     std::atomic<std::uint64_t> messages_dead_lettered_{0};
+
+    // --- Callback ---
+    DeliveryCallback delivery_callback_;
 };
 
 } // namespace dse

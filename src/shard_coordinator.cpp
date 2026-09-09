@@ -498,13 +498,13 @@ CoordinatorIngestResponse ShardCoordinator::ingest(
                                        source_node, request.content};
         if (event_store_) {
             idx_event.event_id = event_store_->create_event(
-                topics::kDocumentIndexed, "");
+                topics::kDocumentMutations, std::to_string(request.id), "");
             const std::string payload = event_json::to_json(idx_event);
             dispatcher_->enqueue_with_event(
-                idx_event.event_id, topics::kDocumentIndexed, payload);
+                idx_event.event_id, topics::kDocumentMutations, std::to_string(request.id), payload);
         } else {
             dispatcher_->enqueue(
-                topics::kDocumentIndexed,
+                topics::kDocumentMutations, std::to_string(request.id),
                 event_json::to_json(idx_event));
         }
     }
@@ -601,13 +601,13 @@ CoordinatorUpdateResponse ShardCoordinator::update(
                                        source_node, request.content};
         if (event_store_) {
             upd_event.event_id = event_store_->create_event(
-                topics::kDocumentUpdated, "");
+                topics::kDocumentMutations, std::to_string(request.id), "");
             const std::string payload = event_json::to_json(upd_event);
             dispatcher_->enqueue_with_event(
-                upd_event.event_id, topics::kDocumentUpdated, payload);
+                upd_event.event_id, topics::kDocumentMutations, std::to_string(request.id), payload);
         } else {
             dispatcher_->enqueue(
-                topics::kDocumentUpdated,
+                topics::kDocumentMutations, std::to_string(request.id),
                 event_json::to_json(upd_event));
         }
     }
@@ -667,13 +667,13 @@ CoordinatorDeleteResponse ShardCoordinator::remove(doc_id id)
         DocumentRemovedEvent rm_event{0, id, shard_id, source_node};
         if (event_store_) {
             rm_event.event_id = event_store_->create_event(
-                topics::kDocumentRemoved, "");
+                topics::kDocumentMutations, std::to_string(id), "");
             const std::string payload = event_json::to_json(rm_event);
             dispatcher_->enqueue_with_event(
-                rm_event.event_id, topics::kDocumentRemoved, payload);
+                rm_event.event_id, topics::kDocumentMutations, std::to_string(id), payload);
         } else {
             dispatcher_->enqueue(
-                topics::kDocumentRemoved,
+                topics::kDocumentMutations, std::to_string(id),
                 event_json::to_json(rm_event));
         }
     }

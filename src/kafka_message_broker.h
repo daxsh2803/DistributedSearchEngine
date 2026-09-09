@@ -139,6 +139,8 @@ public:
     // Consumer: register a handler for a topic. Must be called before start().
     void subscribe(const Topic& topic, MessageHandler handler) override;
 
+    void set_delivery_callback(DeliveryCallback cb) override { delivery_callback_ = std::move(cb); }
+
     // Start producer poll thread and consumer thread(s).
     void start() override;
 
@@ -163,6 +165,7 @@ public:
 
     // Number of rebalance events since construction.
     std::uint64_t rebalance_count() const;
+    std::uint64_t consumer_lag() const;
 
 private:
     // Producer poll thread loop: calls client_->poll() periodically.
@@ -204,6 +207,9 @@ private:
     std::atomic<std::uint64_t> messages_consumed_{0};
     std::atomic<std::uint64_t> messages_acked_{0};
     std::atomic<std::uint64_t> messages_nacked_{0};
+
+    // --- Callback ---
+    DeliveryCallback delivery_callback_;
 };
 
 } // namespace dse

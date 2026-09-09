@@ -55,6 +55,13 @@ public:
     virtual std::optional<Offset> publish_with_timeout(
         Message message, std::size_t timeout_ms) = 0;
 
+    // Callback invoked when an async delivery report is received.
+    // Signature: void(MessageId id, bool success, const std::string& error)
+    using DeliveryCallback = std::function<void(MessageId, bool, std::string)>;
+
+    // Set the delivery callback. Must be called before start().
+    virtual void set_delivery_callback(DeliveryCallback /*cb*/) {}
+
     // --- Consumer API ---------------------------------------------------
 
     // Register a handler for a topic.

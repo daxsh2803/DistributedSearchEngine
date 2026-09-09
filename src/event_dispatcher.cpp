@@ -37,6 +37,14 @@ EventDispatcher::EventDispatcher(MessageBroker& broker, EventStore& store)
     : broker_(broker)
     , store_(&store)
 {
+    broker_.set_delivery_callback([this](MessageId id, bool success, std::string error) {
+        if (!store_) return;
+        if (success) {
+            store_->mark_published(id);
+        } else {
+            store_->mark_failed(id, error);
+        }
+    });
 }
 
 EventDispatcher::EventDispatcher(MessageBroker& broker, EventStore& store,
@@ -45,6 +53,14 @@ EventDispatcher::EventDispatcher(MessageBroker& broker, EventStore& store,
     , broker_(broker)
     , store_(&store)
 {
+    broker_.set_delivery_callback([this](MessageId id, bool success, std::string error) {
+        if (!store_) return;
+        if (success) {
+            store_->mark_published(id);
+        } else {
+            store_->mark_failed(id, error);
+        }
+    });
 }
 
 EventDispatcher::~EventDispatcher()
@@ -70,7 +86,7 @@ void EventDispatcher::start()
 // Enqueue
 // ---------------------------------------------------------------------------
 
-bool EventDispatcher::enqueue(std::string topic, std::string payload,
+bool EventDispatcher::enqueue(std::string topic, std::string key, std::string payload,
                               std::size_t timeout_ms)
 {
     if (!running_.load() || stopping_.load()) {
@@ -80,6 +96,7 @@ bool EventDispatcher::enqueue(std::string topic, std::string payload,
 
     Event event;
     event.topic = std::move(topic);
+    event.key = std::move(key);
     event.payload = std::move(payload);
     event.event_id = 0;  // No tracking.
 
@@ -121,6 +138,7 @@ bool EventDispatcher::enqueue(std::string topic, std::string payload,
 
 bool EventDispatcher::enqueue_with_event(std::uint64_t event_id,
                                           std::string topic,
+                                          std::string key,
                                           std::string payload,
                                           std::size_t timeout_ms)
 {
@@ -139,6 +157,7 @@ bool EventDispatcher::enqueue_with_event(std::uint64_t event_id,
 
     Event event;
     event.topic = std::move(topic);
+    event.key = std::move(key);
     event.payload = std::move(payload);
     event.event_id = event_id;
 
@@ -227,7 +246,7 @@ std::size_t EventDispatcher::replay_failed()
             ++requeued;
             ++replayed_;
             // Re-enqueue into the dispatcher.
-            enqueue_with_event(ev.id, std::move(ev.topic),
+            enqueue_with_event(ev.id, std::move(ev.topic), std::move(ev.key),
                                std::move(ev.payload), 0);
         }
     }
@@ -304,6 +323,10 @@ bool EventDispatcher::process_event(Event& event)
 
         // Record each delivery attempt in the event store.
         if (tracked) {
+            if (attempt > 0) {
+                store_->requeue(event.event_id);
+                store_->mark_dispatching(event.event_id);
+            }
             store_->record_attempt(event.event_id);
         }
 
@@ -318,9 +341,7 @@ bool EventDispatcher::process_event(Event& event)
 
         if (publish_to_broker(event)) {
             ++published_;
-            if (tracked) {
-                store_->mark_published(event.event_id);
-            }
+            // store_->mark_published is handled by the async delivery callback.
             return true;
         }
 
@@ -341,7 +362,9 @@ bool EventDispatcher::process_event(Event& event)
 bool EventDispatcher::publish_to_broker(const Event& event)
 {
     Message msg;
+    msg.id = event.event_id;
     msg.topic = event.topic;
+    msg.key = event.key;
     msg.payload = event.payload;
 
     try {

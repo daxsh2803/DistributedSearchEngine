@@ -61,9 +61,7 @@ struct DocumentRemovedEvent {
 // ---------------------------------------------------------------------------
 
 namespace topics {
-    inline const std::string kDocumentIndexed  = "documents.indexed";
-    inline const std::string kDocumentUpdated  = "documents.updated";
-    inline const std::string kDocumentRemoved  = "documents.removed";
+    inline const std::string kDocumentMutations = "documents.mutations";
 } // namespace topics
 
 // ---------------------------------------------------------------------------

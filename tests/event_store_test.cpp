@@ -36,9 +36,9 @@ TEST(EventStoreTest, CreateEventAssignsIncrementingIds)
 {
     auto store = create_in_memory_event_store();
 
-    auto id1 = store->create_event("topic", "payload1");
-    auto id2 = store->create_event("topic", "payload2");
-    auto id3 = store->create_event("topic", "payload3");
+    auto id1 = store->create_event("topic", "", "payload1");
+    auto id2 = store->create_event("topic", "", "payload2");
+    auto id3 = store->create_event("topic", "", "payload3");
 
     EXPECT_GT(id1, 0u);
     EXPECT_GT(id2, id1);
@@ -51,7 +51,7 @@ TEST(EventStoreTest, EventIdIsUnique)
     std::set<EventId> ids;
 
     for (int i = 0; i < 100; ++i) {
-        auto id = store->create_event("topic", "payload");
+        auto id = store->create_event("topic", "", "payload");
         EXPECT_TRUE(ids.insert(id).second) << "Duplicate ID: " << id;
     }
 }
@@ -63,7 +63,7 @@ TEST(EventStoreTest, EventIdIsUnique)
 TEST(EventStoreTest, NewEventIsPending)
 {
     auto store = create_in_memory_event_store();
-    auto id = store->create_event("topic", "payload");
+    auto id = store->create_event("topic", "", "payload");
 
     auto* ev = store->get(id);
     ASSERT_NE(ev, nullptr);
@@ -88,7 +88,7 @@ TEST(EventStoreTest, GetReturnsNullptrForUnknownId)
 TEST(EventStoreTest, PendingToDispatching)
 {
     auto store = create_in_memory_event_store();
-    auto id = store->create_event("topic", "data");
+    auto id = store->create_event("topic", "", "data");
 
     store->mark_dispatching(id);
     auto* ev = store->get(id);
@@ -99,7 +99,7 @@ TEST(EventStoreTest, PendingToDispatching)
 TEST(EventStoreTest, DispatchingToPublished)
 {
     auto store = create_in_memory_event_store();
-    auto id = store->create_event("topic", "data");
+    auto id = store->create_event("topic", "", "data");
 
     store->mark_dispatching(id);
     store->record_attempt(id);
@@ -114,7 +114,7 @@ TEST(EventStoreTest, DispatchingToPublished)
 TEST(EventStoreTest, DispatchingToFailed)
 {
     auto store = create_in_memory_event_store();
-    auto id = store->create_event("topic", "data");
+    auto id = store->create_event("topic", "", "data");
 
     store->mark_dispatching(id);
     store->record_attempt(id);
@@ -130,7 +130,7 @@ TEST(EventStoreTest, DispatchingToFailed)
 TEST(EventStoreTest, FailedToPendingViaRequeue)
 {
     auto store = create_in_memory_event_store();
-    auto id = store->create_event("topic", "data");
+    auto id = store->create_event("topic", "", "data");
 
     store->mark_dispatching(id);
     store->mark_failed(id, "error");
@@ -145,7 +145,7 @@ TEST(EventStoreTest, FailedToPendingViaRequeue)
 TEST(EventStoreTest, RequeueOnlyWorksForFailed)
 {
     auto store = create_in_memory_event_store();
-    auto id = store->create_event("topic", "data");
+    auto id = store->create_event("topic", "", "data");
 
     // PENDING state - should fail
     EXPECT_FALSE(store->requeue(id));
@@ -164,7 +164,7 @@ TEST(EventStoreTest, RequeueUnknownEventFails)
 TEST(EventStoreTest, AttemptCountIncrements)
 {
     auto store = create_in_memory_event_store();
-    auto id = store->create_event("topic", "data");
+    auto id = store->create_event("topic", "", "data");
 
     store->mark_dispatching(id);
     store->record_attempt(id);
@@ -182,7 +182,7 @@ TEST(EventStoreTest, AttemptCountIncrements)
 TEST(EventStoreTest, RecordAttemptIncrementsCount)
 {
     auto store = create_in_memory_event_store();
-    auto id = store->create_event("topic", "data");
+    auto id = store->create_event("topic", "", "data");
 
     store->mark_dispatching(id);
     store->record_attempt(id);  // attempt 1
@@ -205,9 +205,9 @@ TEST(EventStoreTest, GetByStatus)
 {
     auto store = create_in_memory_event_store();
 
-    auto id1 = store->create_event("t1", "p1");
-    auto id2 = store->create_event("t1", "p2");
-    auto id3 = store->create_event("t1", "p3");
+    auto id1 = store->create_event("t1", "", "p1");
+    auto id2 = store->create_event("t1", "", "p2");
+    auto id3 = store->create_event("t1", "", "p3");
 
     store->mark_dispatching(id1);
     store->mark_published(id1);
@@ -227,9 +227,9 @@ TEST(EventStoreTest, GetByTopic)
 {
     auto store = create_in_memory_event_store();
 
-    store->create_event("topicA", "p1");
-    store->create_event("topicB", "p2");
-    store->create_event("topicA", "p3");
+    store->create_event("topicA", "", "p1");
+    store->create_event("topicB", "", "p2");
+    store->create_event("topicA", "", "p3");
 
     auto topicA = store->get_by_topic("topicA", EventStatus::PENDING);
     EXPECT_EQ(topicA.size(), 2u);
@@ -249,8 +249,8 @@ TEST(EventStoreTest, StatsTrackLifecycle)
 {
     auto store = create_in_memory_event_store();
 
-    auto id1 = store->create_event("t", "p");
-    auto id2 = store->create_event("t", "p");
+    auto id1 = store->create_event("t", "", "p");
+    auto id2 = store->create_event("t", "", "p");
 
     auto s = store->stats();
     EXPECT_EQ(s.total, 2u);
@@ -274,7 +274,7 @@ TEST(EventStoreTest, StatsTrackLifecycle)
 TEST(EventStoreTest, StatsTrackRetries)
 {
     auto store = create_in_memory_event_store();
-    auto id = store->create_event("t", "p");
+    auto id = store->create_event("t", "", "p");
 
     store->mark_dispatching(id);
     store->mark_failed(id, "err");
@@ -300,7 +300,7 @@ TEST(EventStoreTest, ConcurrentCreateEvents)
     for (int t = 0; t < kThreads; ++t) {
         threads.emplace_back([&, t]() {
             for (int i = 0; i < kPerThread; ++i) {
-                auto id = store->create_event("topic", "data");
+                auto id = store->create_event("topic", "", "data");
                 thread_ids[t].push_back(id);
             }
         });
@@ -329,7 +329,7 @@ TEST(EventStoreTest, ConcurrentDispatchAndPublish)
     // Create events first
     std::vector<EventId> ids;
     for (int i = 0; i < N; ++i) {
-        ids.push_back(store->create_event("topic", "data"));
+        ids.push_back(store->create_event("topic", "", "data"));
     }
 
     // Mark dispatching from one thread, publishing from another
@@ -376,7 +376,7 @@ TEST(EventStoreTest, ConcurrentRequeue)
     // Create and fail all events
     std::vector<EventId> ids;
     for (int i = 0; i < N; ++i) {
-        auto id = store->create_event("topic", "data");
+        auto id = store->create_event("topic", "", "data");
         store->mark_dispatching(id);
         store->mark_failed(id, "err");
         ids.push_back(id);

@@ -31,6 +31,11 @@ public:
         report.topic = message.topic_name();
         report.partition = message.partition();
         report.offset = message.offset();
+        report.opaque = message.msg_opaque();
+
+        if (on_report) {
+            on_report(report);
+        }
 
         {
             std::lock_guard lock(mutex_);
@@ -72,6 +77,9 @@ private:
     std::condition_variable cv_;
     std::vector<DeliveryReport> reports_;
     std::atomic<std::uint64_t> total_{0};
+
+public:
+    std::function<void(const DeliveryReport&)> on_report;
 };
 
 // ---------------------------------------------------------------------------
@@ -212,7 +220,8 @@ KafkaClient::~KafkaClient() {
 bool KafkaClient::produce_async(
     const std::string& topic,
     const std::string& payload,
-    const std::string& key)
+    const std::string& key,
+    void* opaque)
 {
     if (!impl_ || impl_->closed.load() || !impl_->producer) {
         return false;
@@ -227,7 +236,7 @@ bool KafkaClient::produce_async(
         key.empty() ? nullptr : key.data(),
         key.size(),
         0,                                // timestamp (auto)
-        nullptr);                         // opaque
+        opaque);                          // opaque
 
     if (err != RdKafka::ERR_NO_ERROR) {
         impl_->error_str = RdKafka::err2str(err);
@@ -243,12 +252,13 @@ DeliveryReport KafkaClient::produce(
     const std::string& topic,
     const std::string& payload,
     const std::string& key,
-    int timeout_ms)
+    int timeout_ms,
+    void* opaque)
 {
     // Record the expected delivery report count before producing.
     const auto before = impl_->dr_cb.total();
 
-    if (!produce_async(topic, payload, key)) {
+    if (!produce_async(topic, payload, key, opaque)) {
         DeliveryReport report;
         report.success = false;
         report.error_message = impl_->error_str;
@@ -340,6 +350,12 @@ std::size_t KafkaClient::outqueue_length() const {
 
 std::uint64_t KafkaClient::delivery_reports_count() const {
     return impl_ ? impl_->dr_cb.total() : 0;
+}
+
+void KafkaClient::set_delivery_report_callback(std::function<void(const DeliveryReport&)> cb) {
+    if (impl_) {
+        impl_->dr_cb.on_report = std::move(cb);
+    }
 }
 
 } // namespace dse

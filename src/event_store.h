@@ -69,6 +69,7 @@ enum class EventStatus {
 struct StoredEvent {
     EventId id = 0;
     std::string topic;
+    std::string key;
     std::string payload;
     EventStatus status = EventStatus::PENDING;
     std::size_t attempt_count = 0;
@@ -110,6 +111,7 @@ public:
     // Create a new event and assign it a stable ID. The event starts
     // in PENDING state. Returns the assigned ID.
     virtual EventId create_event(std::string topic,
+                                 std::string key,
                                  std::string payload) = 0;
 
     // Mark an event as being dispatched (PENDING → DISPATCHING).

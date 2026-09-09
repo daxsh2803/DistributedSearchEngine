@@ -12,6 +12,8 @@
 #include "local_node.h"
 #include "message.h"
 
+#include <nlohmann/json.hpp>
+
 namespace dse {
 
 // ---------------------------------------------------------------------------
@@ -44,16 +46,36 @@ bool RemoteEventProcessor::process(const std::string& topic,
 
     Outcome outcome = Outcome::Failed;
 
-    if (topic == topics::kDocumentIndexed) {
+    if (topic != topics::kDocumentMutations) {
+        // Unknown topic — skipped. Return true so offset is committed.
+        ++events_skipped_;
+        return true;
+    }
+
+    nlohmann::json j;
+    try {
+        j = nlohmann::json::parse(payload);
+    } catch (...) {
+        ++malformed_events_;
+        return true;
+    }
+
+    if (!j.contains("event_type")) {
+        ++malformed_events_;
+        return true;
+    }
+
+    std::string event_type = j["event_type"].get<std::string>();
+
+    if (event_type == "document_indexed") {
         outcome = process_indexed(payload);
-    } else if (topic == topics::kDocumentUpdated) {
+    } else if (event_type == "document_updated") {
         outcome = process_updated(payload);
-    } else if (topic == topics::kDocumentRemoved) {
+    } else if (event_type == "document_removed") {
         outcome = process_removed(payload);
     } else {
-        // Unknown topic — skipped. Return false so caller knows it's unhandled.
         ++events_skipped_;
-        return false;
+        return true;
     }
 
     switch (outcome) {
@@ -83,7 +105,7 @@ RemoteEventProcessor::Outcome RemoteEventProcessor::process_indexed(
     DocumentIndexedEvent event;
     if (!event_json::from_json(payload, event)) {
         ++malformed_events_;
-        return Outcome::Failed;
+        return Outcome::Skipped;
     }
 
     // Self-event check: if this event originated from this node,
@@ -109,6 +131,9 @@ RemoteEventProcessor::Outcome RemoteEventProcessor::process_indexed(
     if (node->apply_remote_indexed(event.shard_id, event.document_id,
                                     event.document_content, &applied)) {
         if (applied) {
+            if (!node->save_shard(event.shard_id)) {
+                return Outcome::Failed; // Transient local failure
+            }
             ++index_operations_;
             return Outcome::Applied;
         } else {
@@ -133,7 +158,7 @@ RemoteEventProcessor::Outcome RemoteEventProcessor::process_updated(
     DocumentUpdatedEvent event;
     if (!event_json::from_json(payload, event)) {
         ++malformed_events_;
-        return Outcome::Failed;
+        return Outcome::Skipped;
     }
 
     // Self-event check: skip events originating from this node.
@@ -153,6 +178,9 @@ RemoteEventProcessor::Outcome RemoteEventProcessor::process_updated(
     if (node->apply_remote_updated(event.shard_id, event.document_id,
                                     event.document_content, &applied)) {
         if (applied) {
+            if (!node->save_shard(event.shard_id)) {
+                return Outcome::Failed; // Transient local failure
+            }
             ++update_operations_;
             return Outcome::Applied;
         } else {
@@ -175,7 +203,7 @@ RemoteEventProcessor::Outcome RemoteEventProcessor::process_removed(
     DocumentRemovedEvent event;
     if (!event_json::from_json(payload, event)) {
         ++malformed_events_;
-        return Outcome::Failed;
+        return Outcome::Skipped;
     }
 
     // Self-event check: skip events originating from this node.
@@ -194,6 +222,9 @@ RemoteEventProcessor::Outcome RemoteEventProcessor::process_removed(
     bool applied = false;
     if (node->apply_remote_removed(event.shard_id, event.document_id, &applied)) {
         if (applied) {
+            if (!node->save_shard(event.shard_id)) {
+                return Outcome::Failed; // Transient local failure
+            }
             ++remove_operations_;
             return Outcome::Applied;
         } else {

@@ -89,7 +89,7 @@ public:
 
     // --- EventStore interface ---
 
-    EventId create_event(std::string topic, std::string payload) override;
+    EventId create_event(std::string topic, std::string key, std::string payload) override;
     void mark_dispatching(EventId id) override;
     void record_attempt(EventId id) override;
     void mark_published(EventId id) override;

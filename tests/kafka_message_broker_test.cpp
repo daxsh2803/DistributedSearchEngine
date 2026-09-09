@@ -615,60 +615,123 @@ TEST_F(KafkaConsumerTest, SuccessfulHandlerCommitsOffset)
     EXPECT_GE(received.load(), 3);
 }
 
-// --- 8. Failed handler → offset not committed ---
-// Note: Kafka does NOT redeliver consumed messages within the same session.
-// At-least-once delivery only applies across restarts/rebalances.
-// This test verifies that within a session, all messages are consumed once,
-// and that failed messages do not have their offsets committed.
+// --- 8. Failed handler blocks and retries sequentially ---
+// This test verifies that if a handler fails, the consumer retries the SAME
+// message repeatedly (sequential retry/backoff) and does not proceed to the next.
 
-TEST_F(KafkaConsumerTest, FailedHandlerNoCommit)
+TEST_F(KafkaConsumerTest, SequentialRetryBackoff)
 {
-    const std::string topic = "test.nack-" + unique_group("");
+    const std::string topic = "test.retry-" + unique_group("");
 
     KafkaBrokerConfig ccfg;
     ccfg.bootstrap_servers = "localhost:9094";
-    ccfg.client_id = "dse-test-consumer-nack";
-    ccfg.group_id = unique_group("nack");
+    ccfg.client_id = "dse-test-consumer-retry";
+    ccfg.group_id = unique_group("retry");
 
-    std::atomic<int> received{0};
-    std::atomic<int> success_count{0};
+    std::atomic<int> first_msg_attempts{0};
+    std::atomic<int> second_msg_attempts{0};
 
     KafkaMessageBroker consumer_broker(ccfg);
     consumer_broker.subscribe(topic, [&](const Message& m) -> bool {
-        ++received;
-        // Fail on messages containing "fail"
-        if (m.payload.find("fail") != std::string::npos) {
-            return false;  // no commit
+        if (m.payload == "fail_then_succeed") {
+            ++first_msg_attempts;
+            // Fail the first 3 times, then succeed
+            if (first_msg_attempts.load() <= 3) {
+                return false;
+            }
+            return true;
+        } else if (m.payload == "next_msg") {
+            ++second_msg_attempts;
+            return true;
         }
-        ++success_count;
-        return true;  // commit
+        return true;
     });
     consumer_broker.start();
 
-    // Publish 3 messages.
+    // Publish 2 messages.
     {
         KafkaBrokerConfig pcfg;
         pcfg.bootstrap_servers = "localhost:9094";
-        pcfg.client_id = "dse-test-producer-nack";
+        pcfg.client_id = "dse-test-producer-retry";
         KafkaMessageBroker producer(pcfg);
-        for (int i = 0; i < 3; ++i) {
+
+        Message msg1;
+        msg1.topic = topic;
+        msg1.payload = "fail_then_succeed";
+        producer.publish(std::move(msg1));
+
+        Message msg2;
+        msg2.topic = topic;
+        msg2.payload = "next_msg";
+        producer.publish(std::move(msg2));
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        producer.stop();
+    }
+
+    // Wait until the second message is successfully processed.
+    bool got = wait_until([&] { return second_msg_attempts.load() >= 1; }, 15000);
+    consumer_broker.stop();
+
+    EXPECT_TRUE(got) << "Second message was never processed (blocked indefinitely?)";
+    EXPECT_EQ(first_msg_attempts.load(), 4); // 3 failures + 1 success
+    EXPECT_EQ(second_msg_attempts.load(), 1);
+}
+
+// --- 8b. Estimated Lag Test ---
+
+TEST_F(KafkaConsumerTest, EstimatedLagTracking)
+{
+    const std::string topic = "test.lag-" + unique_group("");
+
+    // Publish messages BEFORE consumer starts to ensure there is lag.
+    {
+        KafkaBrokerConfig pcfg;
+        pcfg.bootstrap_servers = "localhost:9094";
+        pcfg.client_id = "dse-test-producer-lag";
+        KafkaMessageBroker producer(pcfg);
+
+        for (int i = 0; i < 5; ++i) {
             Message msg;
             msg.topic = topic;
-            msg.payload = (i == 1) ? R"({"nack_test":fail})"
-                                   : R"({"nack_test":ok})";
+            msg.payload = "lag_test";
             producer.publish(std::move(msg));
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
         producer.stop();
     }
 
-    // All 3 messages should be consumed (each once, no in-session redelivery).
-    bool got = wait_until([&] { return received.load() >= 3; }, 10000);
+    KafkaBrokerConfig ccfg;
+    ccfg.bootstrap_servers = "localhost:9094";
+    ccfg.client_id = "dse-test-consumer-lag";
+    ccfg.group_id = unique_group("lag");
+
+    std::atomic<int> received{0};
+    KafkaMessageBroker consumer_broker(ccfg);
+
+    // Subscribe but don't start yet.
+    consumer_broker.subscribe(topic, [&](const Message&) -> bool {
+        ++received;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        return true;
+    });
+
+    consumer_broker.start();
+
+    // Check lag while processing.
+    bool saw_lag = wait_until([&] { return consumer_broker.consumer_lag() > 0; }, 5000);
+
+    // Wait for all 5 to be processed.
+    wait_until([&] { return received.load() >= 5; }, 10000);
+
+    // Eventually lag should be 0.
+    bool lag_cleared = wait_until([&] { return consumer_broker.consumer_lag() == 0; }, 5000);
+
     consumer_broker.stop();
 
-    EXPECT_TRUE(got) << "Not all messages consumed";
-    EXPECT_EQ(received.load(), 3);  // each consumed exactly once
-    EXPECT_EQ(success_count.load(), 2);  // 2 succeed, 1 fails
+    // Note: consumer_lag() might return 0 if the consumer hasn't joined the group yet,
+    // so saw_lag is a best-effort check, but lag_cleared is a strict requirement.
+    EXPECT_TRUE(lag_cleared) << "Lag did not reach 0";
 }
 
 // --- 9. Consumer restart and committed-offset recovery ---

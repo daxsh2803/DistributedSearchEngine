@@ -44,6 +44,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -82,6 +83,7 @@ struct DeliveryReport {
     std::string topic;
     int32_t partition = 0;
     int64_t offset = 0;
+    void* opaque = nullptr;
 };
 
 // ---------------------------------------------------------------------------
@@ -113,7 +115,8 @@ public:
     bool produce_async(
         const std::string& topic,
         const std::string& payload,
-        const std::string& key = "");
+        const std::string& key = "",
+        void* opaque = nullptr);
 
     // Synchronous convenience. Produces and blocks until the delivery
     // report is received (or timeout expires).
@@ -122,7 +125,8 @@ public:
         const std::string& topic,
         const std::string& payload,
         const std::string& key = "",
-        int timeout_ms = 5000);
+        int timeout_ms = 5000,
+        void* opaque = nullptr);
 
     // --- Event processing -----------------------------------------------
 
@@ -141,6 +145,9 @@ public:
     // Graceful shutdown. Flushes pending messages and closes the producer.
     // Safe to call multiple times.
     void close();
+
+    // Set callback for asynchronous delivery reports.
+    void set_delivery_report_callback(std::function<void(const DeliveryReport&)> cb);
 
     // --- Health / status ------------------------------------------------
 

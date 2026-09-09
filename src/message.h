@@ -73,6 +73,7 @@ enum class DeliveryState {
 struct Message {
     MessageId id = 0;
     Topic topic;
+    std::string key;
     std::string payload;
     Offset offset = 0;
     std::chrono::steady_clock::time_point published_at;

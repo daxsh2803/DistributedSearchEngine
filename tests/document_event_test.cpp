@@ -141,9 +141,7 @@ TEST(DocumentEventTest, RemovedEventSerialization)
 
 TEST(DocumentEventTest, TopicNamesAreCorrect)
 {
-    EXPECT_EQ(topics::kDocumentIndexed, "documents.indexed");
-    EXPECT_EQ(topics::kDocumentUpdated, "documents.updated");
-    EXPECT_EQ(topics::kDocumentRemoved, "documents.removed");
+    EXPECT_EQ(topics::kDocumentMutations, "documents.mutations");
 }
 
 // ---------------------------------------------------------------------------
@@ -153,7 +151,7 @@ TEST(DocumentEventTest, TopicNamesAreCorrect)
 TEST(DocumentEventTest, SuccessfulIngestProducesIndexedEvent)
 {
     InMemoryMessageBroker broker;
-    broker.subscribe(topics::kDocumentIndexed, [](const Message& msg) {
+    broker.subscribe(topics::kDocumentMutations, [](const Message& msg) {
         auto j = nlohmann::json::parse(msg.payload);
         EXPECT_EQ(j["event_type"], "document_indexed");
         EXPECT_EQ(j["document_id"], 1u);
@@ -176,10 +174,11 @@ TEST(DocumentEventTest, SuccessfulIngestProducesIndexedEvent)
 TEST(DocumentEventTest, SuccessfulUpdateProducesUpdatedEvent)
 {
     InMemoryMessageBroker broker;
-    broker.subscribe(topics::kDocumentUpdated, [](const Message& msg) {
+    broker.subscribe(topics::kDocumentMutations, [](const Message& msg) {
         auto j = nlohmann::json::parse(msg.payload);
-        EXPECT_EQ(j["event_type"], "document_updated");
-        EXPECT_EQ(j["document_id"], 5u);
+        if (j["event_type"] == "document_updated") {
+            EXPECT_EQ(j["document_id"], 5u);
+        }
         return true;
     });
     broker.start();
@@ -194,16 +193,17 @@ TEST(DocumentEventTest, SuccessfulUpdateProducesUpdatedEvent)
 
     dispatcher.stop();
     broker.stop();
-    EXPECT_EQ(broker.stats().messages_acknowledged, 1u);
+    EXPECT_EQ(broker.stats().messages_acknowledged, 2u);
 }
 
 TEST(DocumentEventTest, SuccessfulRemoveProducesRemovedEvent)
 {
     InMemoryMessageBroker broker;
-    broker.subscribe(topics::kDocumentRemoved, [](const Message& msg) {
+    broker.subscribe(topics::kDocumentMutations, [](const Message& msg) {
         auto j = nlohmann::json::parse(msg.payload);
-        EXPECT_EQ(j["event_type"], "document_removed");
-        EXPECT_EQ(j["document_id"], 10u);
+        if (j["event_type"] == "document_removed") {
+            EXPECT_EQ(j["document_id"], 10u);
+        }
         return true;
     });
     broker.start();
@@ -218,7 +218,7 @@ TEST(DocumentEventTest, SuccessfulRemoveProducesRemovedEvent)
 
     dispatcher.stop();
     broker.stop();
-    EXPECT_EQ(broker.stats().messages_acknowledged, 1u);
+    EXPECT_EQ(broker.stats().messages_acknowledged, 2u);
 }
 
 // ---------------------------------------------------------------------------
@@ -229,7 +229,7 @@ TEST(DocumentEventTest, FailedIngestProducesNoEvent)
 {
     InMemoryMessageBroker broker;
     std::atomic<int> event_count{0};
-    broker.subscribe(topics::kDocumentIndexed, [&](const Message& /*msg*/) {
+    broker.subscribe(topics::kDocumentMutations, [&](const Message& /*msg*/) {
         ++event_count;
         return true;
     });
@@ -252,7 +252,7 @@ TEST(DocumentEventTest, FailedUpdateProducesNoEvent)
 {
     InMemoryMessageBroker broker;
     std::atomic<int> event_count{0};
-    broker.subscribe(topics::kDocumentUpdated, [&](const Message& /*msg*/) {
+    broker.subscribe(topics::kDocumentMutations, [&](const Message& /*msg*/) {
         ++event_count;
         return true;
     });
@@ -307,11 +307,12 @@ TEST(DocumentEventTest, R2IngestProducesExactlyOneIndexedEvent)
 {
     InMemoryMessageBroker broker;
     std::atomic<int> event_count{0};
-    broker.subscribe(topics::kDocumentIndexed, [&](const Message& msg) {
-        ++event_count;
+    broker.subscribe(topics::kDocumentMutations, [&](const Message& msg) {
         auto j = nlohmann::json::parse(msg.payload);
-        EXPECT_EQ(j["event_type"], "document_indexed");
-        EXPECT_EQ(j["document_id"], 1u);
+        if (j["event_type"] == "document_indexed") {
+            ++event_count;
+            EXPECT_EQ(j["document_id"], 1u);
+        }
         return true;
     });
     broker.start();
@@ -333,8 +334,11 @@ TEST(DocumentEventTest, R2UpdateProducesExactlyOneUpdatedEvent)
 {
     InMemoryMessageBroker broker;
     std::atomic<int> event_count{0};
-    broker.subscribe(topics::kDocumentUpdated, [&](const Message& /*msg*/) {
-        ++event_count;
+    broker.subscribe(topics::kDocumentMutations, [&](const Message& msg) {
+        auto j = nlohmann::json::parse(msg.payload);
+        if (j["event_type"] == "document_updated") {
+            ++event_count;
+        }
         return true;
     });
     broker.start();
@@ -356,8 +360,11 @@ TEST(DocumentEventTest, R2RemoveProducesExactlyOneRemovedEvent)
 {
     InMemoryMessageBroker broker;
     std::atomic<int> event_count{0};
-    broker.subscribe(topics::kDocumentRemoved, [&](const Message& /*msg*/) {
-        ++event_count;
+    broker.subscribe(topics::kDocumentMutations, [&](const Message& msg) {
+        auto j = nlohmann::json::parse(msg.payload);
+        if (j["event_type"] == "document_removed") {
+            ++event_count;
+        }
         return true;
     });
     broker.start();
@@ -383,7 +390,7 @@ TEST(DocumentEventTest, MultipleIngestsProduceMultipleEvents)
 {
     InMemoryMessageBroker broker;
     std::atomic<int> event_count{0};
-    broker.subscribe(topics::kDocumentIndexed, [&](const Message& /*msg*/) {
+    broker.subscribe(topics::kDocumentMutations, [&](const Message& /*msg*/) {
         ++event_count;
         return true;
     });
@@ -411,7 +418,7 @@ TEST(DocumentEventTest, EventContainsCorrectShardId)
 {
     InMemoryMessageBroker broker;
     std::size_t captured_shard = 999;
-    broker.subscribe(topics::kDocumentIndexed, [&](const Message& msg) {
+    broker.subscribe(topics::kDocumentMutations, [&](const Message& msg) {
         auto j = nlohmann::json::parse(msg.payload);
         captured_shard = j["shard_id"].get<std::size_t>();
         return true;
@@ -441,14 +448,12 @@ TEST(DocumentEventTest, IngestUpdateRemoveAllProduceEvents)
     std::atomic<int> updated{0};
     std::atomic<int> removed{0};
 
-    broker.subscribe(topics::kDocumentIndexed, [&](const Message& /*msg*/) {
-        ++indexed; return true;
-    });
-    broker.subscribe(topics::kDocumentUpdated, [&](const Message& /*msg*/) {
-        ++updated; return true;
-    });
-    broker.subscribe(topics::kDocumentRemoved, [&](const Message& /*msg*/) {
-        ++removed; return true;
+    broker.subscribe(topics::kDocumentMutations, [&](const Message& msg) {
+        auto j = nlohmann::json::parse(msg.payload);
+        if (j["event_type"] == "document_indexed") ++indexed;
+        else if (j["event_type"] == "document_updated") ++updated;
+        else if (j["event_type"] == "document_removed") ++removed;
+        return true;
     });
     broker.start();
 
@@ -475,7 +480,7 @@ TEST(DocumentEventTest, EventStoreTracksIngestEvent)
 {
     auto store = create_in_memory_event_store();
     InMemoryMessageBroker broker;
-    broker.subscribe(topics::kDocumentIndexed, [](const Message&) {
+    broker.subscribe(topics::kDocumentMutations, [](const Message&) {
         return true;
     });
     broker.start();
@@ -506,7 +511,7 @@ TEST(DocumentEventTest, EventStoreTracksEventId)
     std::atomic<doc_id> received_doc{0};
     std::atomic<EventId> received_event_id{0};
 
-    broker.subscribe(topics::kDocumentUpdated, [&](const Message& msg) {
+    broker.subscribe(topics::kDocumentMutations, [&](const Message& msg) {
         auto j = nlohmann::json::parse(msg.payload);
         received_doc = j["document_id"].get<doc_id>();
         received_event_id = j["event_id"].get<EventId>();
@@ -531,7 +536,7 @@ TEST(DocumentEventTest, EventStoreTracksEventId)
     const auto* stored = store->get(received_event_id.load());
     ASSERT_NE(stored, nullptr);
     EXPECT_EQ(stored->status, EventStatus::PUBLISHED);
-    EXPECT_EQ(stored->topic, topics::kDocumentUpdated);
+    EXPECT_EQ(stored->topic, topics::kDocumentMutations);
     EXPECT_GE(stored->attempt_count, 1u);
 }
 
@@ -539,7 +544,7 @@ TEST(DocumentEventTest, FailedOperationCreatesNoTrackedEvent)
 {
     auto store = create_in_memory_event_store();
     InMemoryMessageBroker broker;
-    broker.subscribe(topics::kDocumentIndexed, [](const Message&) {
+    broker.subscribe(topics::kDocumentMutations, [](const Message&) {
         return true;
     });
     broker.start();
@@ -563,7 +568,7 @@ TEST(DocumentEventTest, R2WithEventStoreProducesOneTrackedEvent)
     auto store = create_in_memory_event_store();
     InMemoryMessageBroker broker;
     std::atomic<int> event_count{0};
-    broker.subscribe(topics::kDocumentIndexed, [&](const Message&) {
+    broker.subscribe(topics::kDocumentMutations, [&](const Message&) {
         ++event_count;
         return true;
     });
@@ -590,7 +595,7 @@ TEST(DocumentEventTest, NoStoreBackwardCompatible)
 {
     InMemoryMessageBroker broker;
     std::atomic<int> event_count{0};
-    broker.subscribe(topics::kDocumentIndexed, [&](const Message&) {
+    broker.subscribe(topics::kDocumentMutations, [&](const Message&) {
         ++event_count;
         return true;
     });

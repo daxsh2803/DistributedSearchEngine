@@ -151,6 +151,9 @@ public:
     // Current number of assigned partitions.
     int assigned_partitions() const;
 
+    // Estimate of consumer lag across all assigned partitions.
+    int64_t estimated_lag() const;
+
 private:
     // Pimpl: hides librdkafka headers from consumers.
     struct Impl;

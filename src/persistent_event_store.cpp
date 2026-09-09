@@ -84,6 +84,7 @@ PersistentEventStore::~PersistentEventStore()
 // ---------------------------------------------------------------------------
 
 EventId PersistentEventStore::create_event(std::string topic,
+                                            std::string key,
                                             std::string payload)
 {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -92,6 +93,7 @@ EventId PersistentEventStore::create_event(std::string topic,
     StoredEvent event;
     event.id = id;
     event.topic = std::move(topic);
+    event.key = std::move(key);
     event.payload = std::move(payload);
     event.status = EventStatus::PENDING;
     event.attempt_count = 0;
@@ -347,6 +349,8 @@ bool PersistentEventStore::load_from_disk()
         StoredEvent ev;
         ev.id = id;
         ev.topic = j["topic"].get<std::string>();
+        ev.key = j.contains("key")
+            ? j["key"].get<std::string>() : std::string();
         ev.payload = j.contains("payload")
             ? j["payload"].get<std::string>() : std::string();
         ev.status = status_from_string(j["status"].get<std::string>());
@@ -450,6 +454,7 @@ bool PersistentEventStore::save_to_disk() const
             nlohmann::json j;
             j["id"] = ev.id;
             j["topic"] = ev.topic;
+            j["key"] = ev.key;
             j["payload"] = ev.payload;
             j["status"] = status_to_string(ev.status);
             j["attempt_count"] = ev.attempt_count;

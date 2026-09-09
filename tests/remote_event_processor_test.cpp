@@ -108,7 +108,7 @@ TEST_F(RemoteEventProcessorTest, IndexedEventAddsDocument)
     const std::string payload = make_indexed_payload(
         1, 100, 0, 1, "hello world");
 
-    EXPECT_TRUE(processor_->process(topics::kDocumentIndexed, payload));
+    EXPECT_TRUE(processor_->process(topics::kDocumentMutations, payload));
 
     // Document should now be in node0, shard 0.
     ShardGetRequest req;
@@ -132,12 +132,12 @@ TEST_F(RemoteEventProcessorTest, UpdatedEventModifiesDocument)
     // First, add a document via indexed event.
     const std::string idx_payload = make_indexed_payload(
         1, 100, 0, 1, "original content");
-    EXPECT_TRUE(processor_->process(topics::kDocumentIndexed, idx_payload));
+    EXPECT_TRUE(processor_->process(topics::kDocumentMutations, idx_payload));
 
     // Now update it.
     const std::string upd_payload = make_updated_payload(
         2, 100, 0, 1, "updated content");
-    EXPECT_TRUE(processor_->process(topics::kDocumentUpdated, upd_payload));
+    EXPECT_TRUE(processor_->process(topics::kDocumentMutations, upd_payload));
 
     ShardGetRequest req;
     req.shard_id = 0;
@@ -159,7 +159,7 @@ TEST_F(RemoteEventProcessorTest, RemovedEventDeletesDocument)
     // Add a document first.
     const std::string idx_payload = make_indexed_payload(
         1, 100, 0, 1, "to be removed");
-    EXPECT_TRUE(processor_->process(topics::kDocumentIndexed, idx_payload));
+    EXPECT_TRUE(processor_->process(topics::kDocumentMutations, idx_payload));
 
     // Verify it exists.
     EXPECT_TRUE(node0_->has_shard(0));
@@ -170,7 +170,7 @@ TEST_F(RemoteEventProcessorTest, RemovedEventDeletesDocument)
 
     // Remove it.
     const std::string rm_payload = make_removed_payload(2, 100, 0, 1);
-    EXPECT_TRUE(processor_->process(topics::kDocumentRemoved, rm_payload));
+    EXPECT_TRUE(processor_->process(topics::kDocumentMutations, rm_payload));
 
     // Verify it's gone.
     auto resp = node0_->get_document(get_req);
@@ -194,7 +194,7 @@ TEST_F(RemoteEventProcessorTest, NoFeedbackLoop)
 
     const std::string payload = make_indexed_payload(
         1, 100, 0, 1, "feedback test");
-    EXPECT_TRUE(processor_->process(topics::kDocumentIndexed, payload));
+    EXPECT_TRUE(processor_->process(topics::kDocumentMutations, payload));
 
     // The processor only holds LocalNode pointers, not a coordinator
     // or dispatcher. This structurally prevents feedback loops.
@@ -213,10 +213,10 @@ TEST_F(RemoteEventProcessorTest, DuplicateIndexedEventIsIdempotent)
         1, 100, 0, 1, "idempotent test");
 
     // First application succeeds.
-    EXPECT_TRUE(processor_->process(topics::kDocumentIndexed, payload));
+    EXPECT_TRUE(processor_->process(topics::kDocumentMutations, payload));
 
     // Second application with same content: idempotent no-op success.
-    EXPECT_TRUE(processor_->process(topics::kDocumentIndexed, payload));
+    EXPECT_TRUE(processor_->process(topics::kDocumentMutations, payload));
 
     // Document should still have original content.
     ShardGetRequest req;
@@ -245,7 +245,7 @@ TEST_F(RemoteEventProcessorTest, WrongShardIsSkipped)
     const std::string payload = make_indexed_payload(
         1, 100, 99, 1, "wrong shard");
 
-    EXPECT_TRUE(processor_->process(topics::kDocumentIndexed, payload));
+    EXPECT_TRUE(processor_->process(topics::kDocumentMutations, payload));
 
     const auto stats = processor_->stats();
     EXPECT_EQ(stats.events_skipped, 1u);
@@ -258,11 +258,12 @@ TEST_F(RemoteEventProcessorTest, WrongShardIsSkipped)
 
 TEST_F(RemoteEventProcessorTest, MalformedEventIsSkipped)
 {
-    EXPECT_FALSE(processor_->process(
-        topics::kDocumentIndexed, "not valid json {{{"));
+    EXPECT_TRUE(processor_->process(
+        topics::kDocumentMutations, "not valid json {{{"));
 
     const auto stats = processor_->stats();
     EXPECT_EQ(stats.malformed_events, 1u);
+    EXPECT_EQ(stats.events_processed, 0u);
 }
 
 // ---------------------------------------------------------------------------
@@ -271,11 +272,12 @@ TEST_F(RemoteEventProcessorTest, MalformedEventIsSkipped)
 
 TEST_F(RemoteEventProcessorTest, UnknownTopicIsSkipped)
 {
-    EXPECT_FALSE(processor_->process(
+    EXPECT_TRUE(processor_->process(
         "unknown.topic", R"({"event_id":1})"));
 
     const auto stats = processor_->stats();
     EXPECT_EQ(stats.events_skipped, 1u);
+    EXPECT_EQ(stats.events_processed, 0u);
 }
 
 // ---------------------------------------------------------------------------
@@ -295,7 +297,7 @@ TEST_F(RemoteEventProcessorTest, SourceNodeIdPreserved)
     EXPECT_EQ(event.document_content, "node metadata test");
 
     // Process should succeed (source_node_id doesn't affect routing).
-    EXPECT_TRUE(processor_->process(topics::kDocumentIndexed, payload));
+    EXPECT_TRUE(processor_->process(topics::kDocumentMutations, payload));
 }
 
 // ---------------------------------------------------------------------------
@@ -305,13 +307,13 @@ TEST_F(RemoteEventProcessorTest, SourceNodeIdPreserved)
 TEST_F(RemoteEventProcessorTest, StatisticsTracking)
 {
     // Process several events.
-    EXPECT_TRUE(processor_->process(topics::kDocumentIndexed,
+    EXPECT_TRUE(processor_->process(topics::kDocumentMutations,
         make_indexed_payload(1, 100, 0, 1, "stats test 1")));
-    EXPECT_TRUE(processor_->process(topics::kDocumentIndexed,
+    EXPECT_TRUE(processor_->process(topics::kDocumentMutations,
         make_indexed_payload(2, 101, 0, 1, "stats test 2")));
-    EXPECT_TRUE(processor_->process(topics::kDocumentUpdated,
+    EXPECT_TRUE(processor_->process(topics::kDocumentMutations,
         make_updated_payload(3, 100, 0, 1, "stats updated")));
-    EXPECT_TRUE(processor_->process(topics::kDocumentRemoved,
+    EXPECT_TRUE(processor_->process(topics::kDocumentMutations,
         make_removed_payload(4, 101, 0, 1)));
 
     const auto stats = processor_->stats();
@@ -328,7 +330,7 @@ TEST_F(RemoteEventProcessorTest, StatisticsTracking)
 
 TEST_F(RemoteEventProcessorTest, ResetStats)
 {
-    EXPECT_TRUE(processor_->process(topics::kDocumentIndexed,
+    EXPECT_TRUE(processor_->process(topics::kDocumentMutations,
         make_indexed_payload(1, 100, 0, 1, "reset test")));
 
     EXPECT_EQ(processor_->stats().events_processed, 1u);
@@ -347,11 +349,11 @@ TEST_F(RemoteEventProcessorTest, ResetStats)
 TEST_F(RemoteEventProcessorTest, MultipleShardsAcrossNodes)
 {
     // Indexed event for shard 0 → goes to node 0.
-    EXPECT_TRUE(processor_->process(topics::kDocumentIndexed,
+    EXPECT_TRUE(processor_->process(topics::kDocumentMutations,
         make_indexed_payload(1, 100, 0, 1, "shard 0 doc")));
 
     // Indexed event for shard 2 → goes to node 1.
-    EXPECT_TRUE(processor_->process(topics::kDocumentIndexed,
+    EXPECT_TRUE(processor_->process(topics::kDocumentMutations,
         make_indexed_payload(2, 200, 2, 1, "shard 2 doc")));
 
     // Verify document in node 0, shard 0.
@@ -378,7 +380,7 @@ TEST_F(RemoteEventProcessorTest, RemoveNonExistentDocumentSucceeds)
     const std::string payload = make_removed_payload(1, 999, 0, 1);
 
     // REMOVE on absent document is an idempotent no-op success.
-    EXPECT_TRUE(processor_->process(topics::kDocumentRemoved, payload));
+    EXPECT_TRUE(processor_->process(topics::kDocumentMutations, payload));
 
     const auto stats = processor_->stats();
     EXPECT_EQ(stats.events_processed, 0u);
@@ -395,7 +397,7 @@ TEST_F(RemoteEventProcessorTest, UpdateNonExistentDocumentFails)
     const std::string payload = make_updated_payload(
         1, 999, 0, 1, "no such doc");
 
-    EXPECT_FALSE(processor_->process(topics::kDocumentUpdated, payload));
+    EXPECT_FALSE(processor_->process(topics::kDocumentMutations, payload));
 }
 
 // ---------------------------------------------------------------------------
@@ -407,10 +409,10 @@ TEST_F(RemoteEventProcessorTest, DuplicateRemovedEventIsIdempotent)
     // First remove: document exists, succeeds.
     const std::string idx_payload = make_indexed_payload(
         1, 100, 0, 1, "to be removed");
-    EXPECT_TRUE(processor_->process(topics::kDocumentIndexed, idx_payload));
+    EXPECT_TRUE(processor_->process(topics::kDocumentMutations, idx_payload));
 
     const std::string rm_payload = make_removed_payload(2, 100, 0, 1);
-    EXPECT_TRUE(processor_->process(topics::kDocumentRemoved, rm_payload));
+    EXPECT_TRUE(processor_->process(topics::kDocumentMutations, rm_payload));
 
     // Verify gone.
     ShardGetRequest req;
@@ -419,7 +421,7 @@ TEST_F(RemoteEventProcessorTest, DuplicateRemovedEventIsIdempotent)
     EXPECT_FALSE(node0_->get_document(req).found);
 
     // Second remove: already absent, idempotent no-op success.
-    EXPECT_TRUE(processor_->process(topics::kDocumentRemoved, rm_payload));
+    EXPECT_TRUE(processor_->process(topics::kDocumentMutations, rm_payload));
 
     const auto stats = processor_->stats();
     EXPECT_EQ(stats.remove_operations, 1u);
@@ -438,14 +440,14 @@ TEST_F(RemoteEventProcessorTest, DuplicateUpdatedEventIsIdempotent)
     // First update: document exists, succeeds.
     const std::string idx_payload = make_indexed_payload(
         1, 100, 0, 1, "original");
-    EXPECT_TRUE(processor_->process(topics::kDocumentIndexed, idx_payload));
+    EXPECT_TRUE(processor_->process(topics::kDocumentMutations, idx_payload));
 
     const std::string upd_payload = make_updated_payload(
         2, 100, 0, 1, "updated");
-    EXPECT_TRUE(processor_->process(topics::kDocumentUpdated, upd_payload));
+    EXPECT_TRUE(processor_->process(topics::kDocumentMutations, upd_payload));
 
     // Second update with same content: idempotent no-op success.
-    EXPECT_TRUE(processor_->process(topics::kDocumentUpdated, upd_payload));
+    EXPECT_TRUE(processor_->process(topics::kDocumentMutations, upd_payload));
 
     ShardGetRequest req;
     req.shard_id = 0;
@@ -469,7 +471,7 @@ TEST_F(RemoteEventProcessorTest, UpdateBeforeIndexFails)
     const std::string upd_payload = make_updated_payload(
         1, 999, 0, 1, "no such doc");
 
-    EXPECT_FALSE(processor_->process(topics::kDocumentUpdated, upd_payload));
+    EXPECT_FALSE(processor_->process(topics::kDocumentMutations, upd_payload));
 
     const auto stats = processor_->stats();
     EXPECT_EQ(stats.events_failed, 1u);
@@ -484,7 +486,7 @@ TEST_F(RemoteEventProcessorTest, RemoveBeforeIndexSucceeds)
     const std::string rm_payload = make_removed_payload(1, 999, 0, 1);
 
     // REMOVE on absent document: idempotent no-op success.
-    EXPECT_TRUE(processor_->process(topics::kDocumentRemoved, rm_payload));
+    EXPECT_TRUE(processor_->process(topics::kDocumentMutations, rm_payload));
 
     const auto stats = processor_->stats();
     EXPECT_EQ(stats.events_processed, 0u);
@@ -503,7 +505,7 @@ TEST_F(RemoteEventProcessorTest, SourceNodeEventIsSkipped)
         1, 100, 0, kNode0Id, "self-event");
 
     // Self-event: source == own node → skipped, returns true (commit offset).
-    EXPECT_TRUE(processor_->process(topics::kDocumentIndexed, payload));
+    EXPECT_TRUE(processor_->process(topics::kDocumentMutations, payload));
 
     // Document should NOT be created (skipped).
     ShardGetRequest req;
@@ -558,8 +560,8 @@ TEST_F(RemoteEventProcessorTest, R2SingleLogicalEvent)
         1, 100, 0, 1, "r=2 test");
 
     // Process the same event twice (simulating at-least-once delivery).
-    EXPECT_TRUE(processor_->process(topics::kDocumentIndexed, payload));
-    EXPECT_TRUE(processor_->process(topics::kDocumentIndexed, payload));
+    EXPECT_TRUE(processor_->process(topics::kDocumentMutations, payload));
+    EXPECT_TRUE(processor_->process(topics::kDocumentMutations, payload));
 
     // Document should exist with original content.
     ShardGetRequest req;
@@ -579,7 +581,7 @@ TEST_F(RemoteEventProcessorTest, EmptyContentRejectedByShard)
     const std::string payload = make_indexed_payload(
         1, 100, 0, 1, "");
 
-    EXPECT_FALSE(processor_->process(topics::kDocumentIndexed, payload));
+    EXPECT_FALSE(processor_->process(topics::kDocumentMutations, payload));
 }
 
 // ---------------------------------------------------------------------------
@@ -589,8 +591,8 @@ TEST_F(RemoteEventProcessorTest, EmptyContentRejectedByShard)
 TEST_F(RemoteEventProcessorTest, DeserializationFailureIndexed)
 {
     // Missing required fields.
-    EXPECT_FALSE(processor_->process(
-        topics::kDocumentIndexed, R"({"event_type":"document_indexed"})"));
+    EXPECT_TRUE(processor_->process(
+        topics::kDocumentMutations, R"({"event_type":"document_indexed"})"));
 
     const auto stats = processor_->stats();
     EXPECT_EQ(stats.malformed_events, 1u);
@@ -598,8 +600,8 @@ TEST_F(RemoteEventProcessorTest, DeserializationFailureIndexed)
 
 TEST_F(RemoteEventProcessorTest, DeserializationFailureRemoved)
 {
-    EXPECT_FALSE(processor_->process(
-        topics::kDocumentRemoved, R"({"event_type":"document_removed"})"));
+    EXPECT_TRUE(processor_->process(
+        topics::kDocumentMutations, R"({"event_type":"document_removed"})"));
 
     const auto stats = processor_->stats();
     EXPECT_EQ(stats.malformed_events, 1u);
@@ -620,7 +622,7 @@ TEST_F(RemoteEventProcessorTest, LargeContentPreserved)
     const std::string payload = make_indexed_payload(
         1, 100, 0, 1, large_content);
 
-    EXPECT_TRUE(processor_->process(topics::kDocumentIndexed, payload));
+    EXPECT_TRUE(processor_->process(topics::kDocumentMutations, payload));
 
     ShardGetRequest req;
     req.shard_id = 0;
@@ -649,11 +651,11 @@ TEST_F(RemoteEventProcessorTest, ConcurrentProcessing)
                 // shard 2 is on node1
                 const std::string payload = make_indexed_payload(
                     i, id, 2, 1, "concurrent doc " + std::to_string(i));
-                processor_->process(topics::kDocumentIndexed, payload);
+                processor_->process(topics::kDocumentMutations, payload);
             } else {
                 const std::string payload = make_indexed_payload(
                     i, id, shard_id, 0, "concurrent doc " + std::to_string(i));
-                processor_->process(topics::kDocumentIndexed, payload);
+                processor_->process(topics::kDocumentMutations, payload);
             }
         });
     }

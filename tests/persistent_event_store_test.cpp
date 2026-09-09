@@ -106,7 +106,7 @@ TEST(PersistentEventStoreTest, CreateAndQueryEvent)
     {
         PersistentEventStore store(dir);
 
-        auto id = store.create_event("test.topic", "hello world");
+        auto id = store.create_event("test.topic", "", "hello world");
 
         EXPECT_GT(id, 0u);
         EXPECT_EQ(store.size(), 1u);
@@ -138,9 +138,9 @@ TEST(PersistentEventStoreTest, SaveAndLoadEvents)
     // Create events, mark some through lifecycle, then flush.
     {
         PersistentEventStore store(dir);
-        auto id1 = store.create_event("topic.A", "payload1");
-        auto id2 = store.create_event("topic.B", "payload2");
-        store.create_event("topic.A", "payload3");
+        auto id1 = store.create_event("topic.A", "", "payload1");
+        auto id2 = store.create_event("topic.B", "", "payload2");
+        store.create_event("topic.A", "", "payload3");
 
         store.mark_dispatching(id1);
         store.mark_published(id1);
@@ -184,7 +184,7 @@ TEST(PersistentEventStoreTest, EventIdStabilityAcrossLoad)
     EventId firstId;
     {
         PersistentEventStore store(dir);
-        firstId = store.create_event("topic", "data");
+        firstId = store.create_event("topic", "", "data");
         store.flush();
     }
 
@@ -197,7 +197,7 @@ TEST(PersistentEventStoreTest, EventIdStabilityAcrossLoad)
         EXPECT_EQ(ev->id, firstId);
 
         // New events should continue from the recovered max.
-        secondId = store.create_event("topic", "data2");
+        secondId = store.create_event("topic", "", "data2");
         EXPECT_GT(secondId, firstId);
     }
 
@@ -214,7 +214,7 @@ TEST(PersistentEventStoreTest, PendingEventSurvivesRestart)
     EventId savedId;
     {
         PersistentEventStore store(dir);
-        savedId = store.create_event("topic", "pending_event");
+        savedId = store.create_event("topic", "", "pending_event");
         // Don't dispatch — just save.
         store.flush();
     }
@@ -241,7 +241,7 @@ TEST(PersistentEventStoreTest, DispatchingBecomesPendingAfterRestart)
     EventId savedId;
     {
         PersistentEventStore store(dir);
-        savedId = store.create_event("topic", "was_dispatching");
+        savedId = store.create_event("topic", "", "was_dispatching");
         store.mark_dispatching(savedId);
         // Crash happens here — event is DISPATCHING on disk.
         store.flush();
@@ -271,7 +271,7 @@ TEST(PersistentEventStoreTest, PublishedEventRemainsPublished)
     EventId savedId;
     {
         PersistentEventStore store(dir);
-        savedId = store.create_event("topic", "done");
+        savedId = store.create_event("topic", "", "done");
         store.mark_dispatching(savedId);
         store.record_attempt(savedId);
         store.mark_published(savedId);
@@ -299,7 +299,7 @@ TEST(PersistentEventStoreTest, FailedEventRemainsFailed)
     EventId savedId;
     {
         PersistentEventStore store(dir);
-        savedId = store.create_event("topic", "did_not_deliver");
+        savedId = store.create_event("topic", "", "did_not_deliver");
         store.mark_dispatching(savedId);
         store.record_attempt(savedId);
         store.mark_failed(savedId, "broker rejected");
@@ -380,7 +380,7 @@ TEST(PersistentEventStoreTest, MissingPersistenceFiles)
         EXPECT_EQ(store.stats().total, 0u);
 
         // Should be able to create events normally.
-        auto id = store.create_event("topic", "first");
+        auto id = store.create_event("topic", "", "first");
         EXPECT_GT(id, 0u);
         EXPECT_EQ(store.size(), 1u);
     }
@@ -399,10 +399,10 @@ TEST(PersistentEventStoreTest, StatsSurviveRestart)
         PersistentEventStore store(dir);
 
         // Create events and move them through various states.
-        auto id1 = store.create_event("t", "p");  // total=1
-        auto id2 = store.create_event("t", "p");  // total=2
-        auto id3 = store.create_event("t", "p");  // total=3
-        store.create_event("t", "p");  // total=4
+        auto id1 = store.create_event("t", "", "p");  // total=1
+        auto id2 = store.create_event("t", "", "p");  // total=2
+        auto id3 = store.create_event("t", "", "p");  // total=3
+        store.create_event("t", "", "p");  // total=4
 
         store.mark_dispatching(id1);
         store.mark_dispatching(id2);
@@ -441,9 +441,9 @@ TEST(PersistentEventStoreTest, MultipleSaveLoadCycles)
     EventId lastId;
     {
         PersistentEventStore store(dir);
-        store.create_event("t1", "a");
-        store.create_event("t2", "b");
-        store.create_event("t3", "c");
+        store.create_event("t1", "", "a");
+        store.create_event("t2", "", "b");
+        store.create_event("t3", "", "c");
         store.flush();
     }
 
@@ -451,7 +451,7 @@ TEST(PersistentEventStoreTest, MultipleSaveLoadCycles)
     {
         PersistentEventStore store(dir);
         EXPECT_EQ(store.size(), 3u);
-        auto id = store.create_event("t4", "d");
+        auto id = store.create_event("t4", "", "d");
         lastId = id;
         store.flush();
     }
@@ -466,7 +466,7 @@ TEST(PersistentEventStoreTest, MultipleSaveLoadCycles)
         EXPECT_EQ(ev->payload, "d");
 
         // Create one more
-        auto finalId = store.create_event("t5", "e");
+        auto finalId = store.create_event("t5", "", "e");
         EXPECT_GT(finalId, lastId);
         store.flush();
     }
@@ -493,7 +493,7 @@ TEST(PersistentEventStoreTest, RecoveryThenDispatch)
     EventId savedId;
     {
         PersistentEventStore store(dir);
-        savedId = store.create_event("recovery.topic", "recover_me");
+        savedId = store.create_event("recovery.topic", "", "recover_me");
         store.mark_dispatching(savedId);
         // Crash before mark_published
         store.flush();
@@ -527,7 +527,7 @@ TEST(PersistentEventStoreTest, RecoveryThenDispatch)
     // Better test: create a FAILED event, persist, recover, replay.
     {
         PersistentEventStore store(dir);
-        auto id = store.create_event("recovery.topic", "retry_me");
+        auto id = store.create_event("recovery.topic", "", "retry_me");
         store.mark_dispatching(id);
         store.record_attempt(id);
         store.mark_failed(id, "broker down");
@@ -568,11 +568,11 @@ TEST(PersistentEventStoreTest, RecoveryThenReplay)
     // Persist two FAILED events.
     {
         PersistentEventStore store(dir);
-        auto id1 = store.create_event("t", "fail1");
+        auto id1 = store.create_event("t", "", "fail1");
         store.mark_dispatching(id1);
         store.mark_failed(id1, "error1");
 
-        auto id2 = store.create_event("t", "fail2");
+        auto id2 = store.create_event("t", "", "fail2");
         store.mark_dispatching(id2);
         store.mark_failed(id2, "error2");
 
@@ -615,7 +615,7 @@ TEST(PersistentEventStoreTest, PublishedEventsAreNotRedelivered)
     // Persist a PUBLISHED event.
     {
         PersistentEventStore store(dir);
-        auto id = store.create_event("t", "already_done");
+        auto id = store.create_event("t", "", "already_done");
         store.mark_dispatching(id);
         store.record_attempt(id);
         store.mark_published(id);
@@ -665,7 +665,7 @@ TEST(PersistentEventStoreTest, ConcurrentCreateAndFlush)
     for (int t = 0; t < kThreads; ++t) {
         threads.emplace_back([&]() {
             for (int i = 0; i < kPerThread; ++i) {
-                store.create_event("topic", "data");
+                store.create_event("topic", "", "data");
                 ++create_count;
             }
         });
@@ -705,7 +705,7 @@ TEST(PersistentEventStoreTest, FlushIsIdempotent)
 
     {
         PersistentEventStore store(dir);
-        store.create_event("t", "data");
+        store.create_event("t", "", "data");
         store.flush();
         store.flush();  // Second flush should be a no-op (not dirty).
         store.flush();
@@ -736,7 +736,7 @@ TEST(PersistentEventStoreTest, DeterministicPersistence)
         PersistentEventStore store(dir);
         // Create events in reverse order to test sorting.
         for (int i = 10; i >= 1; --i) {
-            store.create_event("topic", "payload_" + std::to_string(i));
+            store.create_event("topic", "", "payload_" + std::to_string(i));
         }
         store.flush();
     }
@@ -803,7 +803,7 @@ TEST(PersistentEventStoreTest, PayloadPreserved)
     {
         PersistentEventStore store(dir);
         for (std::size_t i = 0; i < std::size(payloads); ++i) {
-            store.create_event("topic", payloads[i]);
+            store.create_event("topic", "", payloads[i]);
         }
         store.flush();
     }
@@ -831,9 +831,9 @@ TEST(PersistentEventStoreTest, NewEventsContinueAfterRecoveredMaximumId)
     // Create events with IDs 1, 2, 3 and delete event 2.
     {
         PersistentEventStore store(dir);
-        store.create_event("t", "a");  // id=1
-        auto id2 = store.create_event("t", "b");  // id=2
-        store.create_event("t", "c");  // id=3
+        store.create_event("t", "", "a");  // id=1
+        auto id2 = store.create_event("t", "", "b");  // id=2
+        store.create_event("t", "", "c");  // id=3
         store.mark_dispatching(id2);
         store.mark_published(id2);
         store.flush();
@@ -844,10 +844,10 @@ TEST(PersistentEventStoreTest, NewEventsContinueAfterRecoveredMaximumId)
         PersistentEventStore store(dir);
         EXPECT_EQ(store.size(), 3u);
 
-        auto newId = store.create_event("t", "d");  // should be id=4
+        auto newId = store.create_event("t", "", "d");  // should be id=4
         EXPECT_EQ(newId, 4u);
 
-        auto anotherId = store.create_event("t", "e");  // should be id=5
+        auto anotherId = store.create_event("t", "", "e");  // should be id=5
         EXPECT_EQ(anotherId, 5u);
 
         // Verify no collision with existing events.
@@ -906,10 +906,10 @@ TEST(PersistentEventStoreTest, EndToEndIntegration)
     {
         PersistentEventStore store(dir);
 
-        auto id1 = store.create_event("test.topic", "good_event");
-        auto id2 = store.create_event("test.topic", "will_fail");
-        auto id3 = store.create_event("test.topic", "retry_event");
-        store.create_event("test.topic", "never_dispatched");
+        auto id1 = store.create_event("test.topic", "", "good_event");
+        auto id2 = store.create_event("test.topic", "", "will_fail");
+        auto id3 = store.create_event("test.topic", "", "retry_event");
+        store.create_event("test.topic", "", "never_dispatched");
 
         EventDispatcher::Config cfg;
         cfg.max_retries = 0;  // Fail immediately for id2.

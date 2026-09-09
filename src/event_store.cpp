@@ -23,7 +23,7 @@ public:
 
     // --- Lifecycle ---
 
-    EventId create_event(std::string topic, std::string payload) override
+    EventId create_event(std::string topic, std::string key, std::string payload) override
     {
         std::lock_guard lock(mutex_);
         EventId id = next_id_++;
@@ -31,6 +31,7 @@ public:
         StoredEvent event;
         event.id = id;
         event.topic = std::move(topic);
+        event.key = std::move(key);
         event.payload = std::move(payload);
         event.status = EventStatus::PENDING;
         event.attempt_count = 0;

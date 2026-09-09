@@ -53,12 +53,14 @@ class FailingMessageBroker : public MessageBroker {
 public:
     explicit FailingMessageBroker(bool fail = false) : fail_(fail) {}
 
-    Offset publish(Message /*message*/) override {
+    Offset publish(Message message) override {
         ++attempts_;
         if (fail_) {
+            if (cb_) cb_(message.id, false, "broker failure");
             throw std::runtime_error("broker failure");
         }
         ++successes_;
+        if (cb_) cb_(message.id, true, "");
         return 0;
     }
 
@@ -78,12 +80,15 @@ public:
     }
     bool was_processed(MessageId /*id*/) const override { return false; }
 
+    void set_delivery_callback(DeliveryCallback cb) override { cb_ = cb; }
+
     void set_fail(bool f) { fail_ = f; }
     std::atomic<int> attempts_{0};
     std::atomic<int> successes_{0};
 
 private:
     bool fail_;
+    DeliveryCallback cb_;
 };
 
 // ---------------------------------------------------------------------------
@@ -422,8 +427,9 @@ TEST(EventDispatcherTest, SuccessfulIngestEnqueuesOneEvent)
 {
     InMemoryMessageBroker broker;
     std::atomic<int> event_count{0};
-    broker.subscribe(topics::kDocumentIndexed, [&](const Message&) {
-        ++event_count;
+    broker.subscribe(topics::kDocumentMutations, [&](const Message& msg) {
+        auto j = nlohmann::json::parse(msg.payload);
+        if (j["event_type"] == "document_indexed") ++event_count;
         return true;
     });
     broker.start();
@@ -445,8 +451,9 @@ TEST(EventDispatcherTest, SuccessfulUpdateEnqueuesOneEvent)
 {
     InMemoryMessageBroker broker;
     std::atomic<int> event_count{0};
-    broker.subscribe(topics::kDocumentUpdated, [&](const Message&) {
-        ++event_count;
+    broker.subscribe(topics::kDocumentMutations, [&](const Message& msg) {
+        auto j = nlohmann::json::parse(msg.payload);
+        if (j["event_type"] == "document_updated") ++event_count;
         return true;
     });
     broker.start();
@@ -469,8 +476,9 @@ TEST(EventDispatcherTest, SuccessfulRemoveEnqueuesOneEvent)
 {
     InMemoryMessageBroker broker;
     std::atomic<int> event_count{0};
-    broker.subscribe(topics::kDocumentRemoved, [&](const Message&) {
-        ++event_count;
+    broker.subscribe(topics::kDocumentMutations, [&](const Message& msg) {
+        auto j = nlohmann::json::parse(msg.payload);
+        if (j["event_type"] == "document_removed") ++event_count;
         return true;
     });
     broker.start();
@@ -496,9 +504,13 @@ TEST(EventDispatcherTest, FailedOperationsEnqueueZeroEvents)
     std::atomic<int> updated{0};
     std::atomic<int> removed{0};
 
-    broker.subscribe(topics::kDocumentIndexed, [&](const Message&) { ++indexed; return true; });
-    broker.subscribe(topics::kDocumentUpdated, [&](const Message&) { ++updated; return true; });
-    broker.subscribe(topics::kDocumentRemoved, [&](const Message&) { ++removed; return true; });
+    broker.subscribe(topics::kDocumentMutations, [&](const Message& msg) {
+        auto j = nlohmann::json::parse(msg.payload);
+        if (j["event_type"] == "document_indexed") ++indexed;
+        if (j["event_type"] == "document_updated") ++updated;
+        if (j["event_type"] == "document_removed") ++removed;
+        return true;
+    });
     broker.start();
 
     EventDispatcher dispatcher(broker);
@@ -520,8 +532,9 @@ TEST(EventDispatcherTest, R2SuccessEnqueuesExactlyOneEvent)
 {
     InMemoryMessageBroker broker;
     std::atomic<int> event_count{0};
-    broker.subscribe(topics::kDocumentIndexed, [&](const Message&) {
-        ++event_count;
+    broker.subscribe(topics::kDocumentMutations, [&](const Message& msg) {
+        auto j = nlohmann::json::parse(msg.payload);
+        if (j["event_type"] == "document_indexed") ++event_count;
         return true;
     });
     broker.start();
@@ -681,8 +694,8 @@ TEST(EventDispatcherTest, EnqueueWithEventTracksLifecycle)
     EventDispatcher dispatcher(broker, *store);
     dispatcher.start();
 
-    auto id1 = store->create_event("test.topic", "payload1");
-    auto id2 = store->create_event("test.topic", "payload2");
+    auto id1 = store->create_event("test.topic", "", "payload1");
+    auto id2 = store->create_event("test.topic", "", "payload2");
 
     EXPECT_TRUE(dispatcher.enqueue_with_event(id1, "test.topic", "payload1"));
     EXPECT_TRUE(dispatcher.enqueue_with_event(id2, "test.topic", "payload2"));
@@ -701,7 +714,7 @@ TEST(EventDispatcherTest, BrokerFailureMarksEventFailed)
     EventDispatcher dispatcher(broker, *store);
     dispatcher.start();
 
-    auto id = store->create_event("test.topic", "fail_me");
+    auto id = store->create_event("test.topic", "", "fail_me");
     EXPECT_TRUE(dispatcher.enqueue_with_event(id, "test.topic", "fail_me"));
 
     dispatcher.stop();
@@ -722,7 +735,7 @@ TEST(EventDispatcherTest, RetryRetriesFailedPublishAttempt)
     EventDispatcher dispatcher(broker, *store, cfg);
     dispatcher.start();
 
-    auto id = store->create_event("test.topic", "retry_me");
+    auto id = store->create_event("test.topic", "", "retry_me");
     dispatcher.enqueue_with_event(id, "test.topic", "retry_me");
 
     dispatcher.stop();
@@ -741,13 +754,16 @@ TEST(EventDispatcherTest, SuccessfulAfterRetry)
     // A broker that fails first, then succeeds
     class FlakyBroker : public MessageBroker {
     public:
-        Offset publish(Message) override {
+        Offset publish(Message message) override {
             if (fail_count_.fetch_add(1) < 2) {
+                if (cb_) cb_(message.id, false, "transient");
                 throw std::runtime_error("transient");
             }
+            if (cb_) cb_(message.id, true, "");
             return 0;
         }
         std::optional<Offset> publish_with_timeout(Message m, std::size_t) override { return publish(std::move(m)); }
+        void set_delivery_callback(DeliveryCallback cb) override { cb_ = cb; }
         void subscribe(const Topic&, MessageHandler) override {}
         void start() override {}
         void stop() override {}
@@ -757,6 +773,7 @@ TEST(EventDispatcherTest, SuccessfulAfterRetry)
         bool was_processed(MessageId) const override { return false; }
     private:
         std::atomic<int> fail_count_{0};
+        DeliveryCallback cb_;
     };
 
     FlakyBroker broker;
@@ -765,7 +782,7 @@ TEST(EventDispatcherTest, SuccessfulAfterRetry)
     EventDispatcher dispatcher(broker, *store, cfg);
     dispatcher.start();
 
-    auto id = store->create_event("test.topic", "succeed_soon");
+    auto id = store->create_event("test.topic", "", "succeed_soon");
     dispatcher.enqueue_with_event(id, "test.topic", "succeed_soon");
 
     dispatcher.stop();
@@ -787,7 +804,7 @@ TEST(EventDispatcherTest, ReplayReEnqueuesFailedEvents)
     EventDispatcher dispatcher(broker, *store, cfg);
     dispatcher.start();
 
-    auto id = store->create_event("test.topic", "replay_me");
+    auto id = store->create_event("test.topic", "", "replay_me");
     dispatcher.enqueue_with_event(id, "test.topic", "replay_me");
     dispatcher.stop();
 
@@ -817,7 +834,7 @@ TEST(EventDispatcherTest, ReplayPreservesEventId)
     EventDispatcher dispatcher(broker, *store, cfg);
     dispatcher.start();
 
-    auto id = store->create_event("test.topic", "preserve_me");
+    auto id = store->create_event("test.topic", "", "preserve_me");
     dispatcher.enqueue_with_event(id, "test.topic", "preserve_me");
     dispatcher.stop();
 
@@ -856,7 +873,7 @@ TEST(EventDispatcherTest, ReplayDoesNotAffectPublishedEvents)
     EventDispatcher dispatcher(broker, *store);
     dispatcher.start();
 
-    auto id = store->create_event("test.topic", "done");
+    auto id = store->create_event("test.topic", "", "done");
     dispatcher.enqueue_with_event(id, "test.topic", "done");
     dispatcher.stop();
 
@@ -880,7 +897,7 @@ TEST(EventDispatcherTest, StatsIncludeRetryCount)
     EventDispatcher dispatcher(broker, *store, cfg);
     dispatcher.start();
 
-    auto id = store->create_event("test.topic", "retry_stats");
+    auto id = store->create_event("test.topic", "", "retry_stats");
     dispatcher.enqueue_with_event(id, "test.topic", "retry_stats");
     dispatcher.stop();
 
@@ -908,7 +925,7 @@ TEST(EventDispatcherTest, ConcurrentEventTrackedEnqueue)
     for (int t = 0; t < kThreads; ++t) {
         threads.emplace_back([&]() {
             for (int i = 0; i < kPerThread; ++i) {
-                auto id = store->create_event("test.topic", "event");
+                auto id = store->create_event("test.topic", "", "event");
                 dispatcher.enqueue_with_event(id, "test.topic", "event");
             }
         });
@@ -936,11 +953,16 @@ TEST(EventDispatcherTest, ReplayFailedEventsCount)
     // Fail first, then succeed on replay
     class TempFailBroker : public MessageBroker {
     public:
-        Offset publish(Message) override {
-            if (failing_.load()) throw std::runtime_error("nope");
+        Offset publish(Message message) override {
+            if (failing_.load()) {
+                if (cb_) cb_(message.id, false, "nope");
+                throw std::runtime_error("nope");
+            }
+            if (cb_) cb_(message.id, true, "");
             return 0;
         }
         std::optional<Offset> publish_with_timeout(Message m, std::size_t) override { return publish(std::move(m)); }
+        void set_delivery_callback(DeliveryCallback cb) override { cb_ = cb; }
         void subscribe(const Topic&, MessageHandler) override {}
         void start() override {}
         void stop() override {}
@@ -949,6 +971,7 @@ TEST(EventDispatcherTest, ReplayFailedEventsCount)
         std::vector<Message> dead_letters(const Topic&) const override { return {}; }
         bool was_processed(MessageId) const override { return false; }
         std::atomic<bool> failing_{true};
+        DeliveryCallback cb_;
     };
 
     TempFailBroker broker;
@@ -959,7 +982,7 @@ TEST(EventDispatcherTest, ReplayFailedEventsCount)
 
     // Create 3 events that will all fail
     for (int i = 0; i < 3; ++i) {
-        auto id = store->create_event("test.topic", "fail_" + std::to_string(i));
+        auto id = store->create_event("test.topic", "", "fail_" + std::to_string(i));
         dispatcher.enqueue_with_event(id, "test.topic", "fail_" + std::to_string(i));
     }
     dispatcher.stop();

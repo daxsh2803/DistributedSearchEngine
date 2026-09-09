@@ -310,4 +310,40 @@ int KafkaConsumer::assigned_partitions() const {
     return impl_ ? impl_->rebalance_cb.assigned_count() : 0;
 }
 
+int64_t KafkaConsumer::estimated_lag() const {
+    if (!impl_ || impl_->closed.load() || !impl_->consumer) {
+        return 0;
+    }
+
+    std::vector<RdKafka::TopicPartition*> assignment;
+    if (impl_->consumer->assignment(assignment) != RdKafka::ERR_NO_ERROR) {
+        return 0;
+    }
+
+    if (impl_->consumer->position(assignment) != RdKafka::ERR_NO_ERROR) {
+        RdKafka::TopicPartition::destroy(assignment);
+        return 0;
+    }
+
+    int64_t total_lag = 0;
+    for (auto* tp : assignment) {
+        int64_t low = 0, high = 0;
+        if (impl_->consumer->query_watermark_offsets(
+                tp->topic(), tp->partition(), &low, &high, 1000) == RdKafka::ERR_NO_ERROR) {
+
+            // tp->offset() gives the current logical position.
+            // If valid, lag = high - offset.
+            if (tp->offset() >= 0 && high >= tp->offset()) {
+                total_lag += (high - tp->offset());
+            } else if (tp->offset() < 0 && high > low) {
+                // If offset is invalid (e.g. newly assigned without commit), lag is high - low
+                total_lag += (high - low);
+            }
+        }
+    }
+
+    RdKafka::TopicPartition::destroy(assignment);
+    return total_lag;
+}
+
 } // namespace dse

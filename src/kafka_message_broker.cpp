@@ -34,6 +34,13 @@ KafkaMessageBroker::KafkaMessageBroker(KafkaBrokerConfig config)
     client_cfg.bootstrap_servers = config_.bootstrap_servers;
     client_cfg.client_id = config_.client_id;
     client_ = std::make_unique<KafkaClient>(std::move(client_cfg));
+
+    client_->set_delivery_report_callback([this](const DeliveryReport& report) {
+        if (delivery_callback_ && report.opaque) {
+            MessageId id = static_cast<MessageId>(reinterpret_cast<std::uintptr_t>(report.opaque));
+            delivery_callback_(id, report.success, report.error_message);
+        }
+    });
 }
 
 KafkaMessageBroker::~KafkaMessageBroker()
@@ -79,7 +86,8 @@ Offset KafkaMessageBroker::publish(Message message)
     ensure_poll_thread_started();
 
     bool accepted = client_->produce_async(
-        message.topic, message.payload, /*key=*/"");
+        message.topic, message.payload, message.key,
+        reinterpret_cast<void*>(static_cast<std::uintptr_t>(message.id)));
 
     if (!accepted) {
         throw std::runtime_error(
@@ -97,7 +105,8 @@ std::optional<Offset> KafkaMessageBroker::publish_with_timeout(
     ensure_poll_thread_started();
 
     bool accepted = client_->produce_async(
-        message.topic, message.payload, /*key=*/"");
+        message.topic, message.payload, message.key,
+        reinterpret_cast<void*>(static_cast<std::uintptr_t>(message.id)));
 
     if (accepted) {
         ++messages_published_;
@@ -107,8 +116,9 @@ std::optional<Offset> KafkaMessageBroker::publish_with_timeout(
     // First attempt failed — try synchronous produce with timeout.
     if (timeout_ms > 0 && client_->is_healthy()) {
         auto report = client_->produce(
-            message.topic, message.payload, /*key=*/"",
-            static_cast<int>(timeout_ms));
+            message.topic, message.payload, message.key,
+            static_cast<int>(timeout_ms),
+            reinterpret_cast<void*>(static_cast<std::uintptr_t>(message.id)));
 
         if (report.success) {
             ++messages_published_;
@@ -250,24 +260,35 @@ void KafkaMessageBroker::consumer_loop()
 
         ++messages_consumed_;
 
-        // Invoke handler synchronously.
+        // Invoke handler synchronously with strict sequential retry and bounded backoff.
+        std::size_t backoff_ms = 100;
+        const std::size_t max_backoff_ms = 5000;
         bool success = false;
-        try {
-            success = handler(broker_msg);
-        } catch (...) {
-            success = false;
+
+        while (consumer_running_.load(std::memory_order_relaxed)) {
+            try {
+                success = handler(broker_msg);
+            } catch (...) {
+                success = false;
+            }
+
+            if (success) {
+                break;
+            }
+
+            // Failure: pause, backoff, and retry exactly this message.
+            ++messages_nacked_;
+            std::this_thread::sleep_for(std::chrono::milliseconds(backoff_ms));
+            backoff_ms = std::min(backoff_ms * 2, max_backoff_ms);
+
+            // Keep polling Kafka so we don't get evicted from the consumer group
+            consumer_->poll(0);
         }
 
         if (success) {
             ++messages_acked_;
             // Store this specific offset for commit.
-            // Only successful messages have their offsets committed,
-            // providing at-least-once delivery across restarts.
             consumer_->store_offset(msg);
-        } else {
-            ++messages_nacked_;
-            // Do NOT store/commit this offset — Kafka will redeliver
-            // on restart/rebalance from the last committed offset.
         }
     }
 
@@ -295,15 +316,27 @@ void KafkaMessageBroker::consumer_loop()
 
             ++messages_consumed_;
 
-            try {
-                if (handler(broker_msg)) {
+            bool success = false;
+            std::size_t backoff_ms = 100;
+            const std::size_t max_backoff_ms = 5000;
+
+            while (consumer_running_.load()) {
+                try {
+                    success = handler(broker_msg);
+                } catch (...) {
+                    success = false;
+                }
+
+                if (success) {
                     ++messages_acked_;
                     consumer_->commit();
+                    break;
                 } else {
                     ++messages_nacked_;
+                    // Bounded exponential backoff
+                    std::this_thread::sleep_for(std::chrono::milliseconds(backoff_ms));
+                    backoff_ms = std::min(backoff_ms * 2, max_backoff_ms);
                 }
-            } catch (...) {
-                ++messages_nacked_;
             }
         }
     }
@@ -367,6 +400,11 @@ std::uint64_t KafkaMessageBroker::messages_consumed() const
 std::uint64_t KafkaMessageBroker::rebalance_count() const
 {
     return consumer_ ? consumer_->rebalance_count() : 0;
+}
+
+std::uint64_t KafkaMessageBroker::consumer_lag() const
+{
+    return consumer_ ? static_cast<std::uint64_t>(std::max<int64_t>(0, consumer_->estimated_lag())) : 0;
 }
 
 } // namespace dse

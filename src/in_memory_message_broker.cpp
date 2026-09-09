@@ -42,15 +42,22 @@ Offset InMemoryMessageBroker::publish(Message message) {
     auto& state = *topics_[message.topic];
 
     // Assign identity.
-    message.id = next_message_id_.fetch_add(1, std::memory_order_relaxed);
+    if (message.id == 0) {
+        message.id = next_message_id_.fetch_add(1, std::memory_order_relaxed);
+    }
     message.offset = state.next_offset++;
     message.published_at = std::chrono::steady_clock::now();
     message.state = DeliveryState::Pending;
     message.delivery_attempt = 0;
 
+    const MessageId generated_id = message.id;
     const Offset assigned_offset = message.offset;
     state.pending.push_back(std::move(message));
     messages_published_.fetch_add(1, std::memory_order_relaxed);
+
+    if (delivery_callback_) {
+        delivery_callback_(generated_id, true, "");
+    }
 
     // Wake a consumer thread.
     consume_cv_.notify_one();
@@ -83,15 +90,22 @@ std::optional<Offset> InMemoryMessageBroker::publish_with_timeout(
     auto& state = *topics_[message.topic];
 
     // Assign identity.
-    message.id = next_message_id_.fetch_add(1, std::memory_order_relaxed);
+    if (message.id == 0) {
+        message.id = next_message_id_.fetch_add(1, std::memory_order_relaxed);
+    }
     message.offset = state.next_offset++;
     message.published_at = std::chrono::steady_clock::now();
     message.state = DeliveryState::Pending;
     message.delivery_attempt = 0;
 
+    const MessageId generated_id = message.id;
     const Offset assigned_offset = message.offset;
     state.pending.push_back(std::move(message));
     messages_published_.fetch_add(1, std::memory_order_relaxed);
+
+    if (delivery_callback_) {
+        delivery_callback_(generated_id, true, "");
+    }
 
     consume_cv_.notify_one();
     return assigned_offset;

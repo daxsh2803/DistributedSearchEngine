@@ -228,16 +228,8 @@ int main(int argc, char* argv[])
 
     dse::KafkaMessageBroker broker(kafkaConfig);
 
-    // Register handlers for the three document-event topics.
-    broker.subscribe(dse::topics::kDocumentIndexed,
-        [&remoteProcessor](const dse::Message& msg) {
-            return remoteProcessor.process(msg.topic, msg.payload);
-        });
-    broker.subscribe(dse::topics::kDocumentUpdated,
-        [&remoteProcessor](const dse::Message& msg) {
-            return remoteProcessor.process(msg.topic, msg.payload);
-        });
-    broker.subscribe(dse::topics::kDocumentRemoved,
+    // Register handler for the single document mutations topic.
+    broker.subscribe(dse::topics::kDocumentMutations,
         [&remoteProcessor](const dse::Message& msg) {
             return remoteProcessor.process(msg.topic, msg.payload);
         });

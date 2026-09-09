@@ -110,15 +110,27 @@ public:
     // Enqueue an event for asynchronous dispatch (no event tracking).
     // Blocks up to timeout_ms waiting for queue space.
     // Returns true if enqueued, false if queue remained full.
-    bool enqueue(std::string topic, std::string payload,
+    bool enqueue(std::string topic, std::string key, std::string payload,
                  std::size_t timeout_ms = 0);
+
+    // Backward compatibility for Phase 18
+    bool enqueue(std::string topic, std::string payload, std::size_t timeout_ms = 0) {
+        return enqueue(std::move(topic), "", std::move(payload), timeout_ms);
+    }
 
     // Phase 18E: Enqueue with event tracking via EventStore.
     // The event_id is used to track delivery lifecycle.
     // The EventStore must be available if this method is used.
     bool enqueue_with_event(std::uint64_t event_id,
-                            std::string topic, std::string payload,
+                            std::string topic, std::string key, std::string payload,
                             std::size_t timeout_ms = 0);
+
+    // Backward compatibility for Phase 18E
+    bool enqueue_with_event(std::uint64_t event_id,
+                            std::string topic, std::string payload,
+                            std::size_t timeout_ms = 0) {
+        return enqueue_with_event(event_id, std::move(topic), "", std::move(payload), timeout_ms);
+    }
 
     // Graceful shutdown.
     // 1. Stops accepting new events.
@@ -139,6 +151,7 @@ private:
     // Internal queued event. event_id == 0 means no tracking.
     struct Event {
         std::string topic;
+        std::string key;
         std::string payload;
         std::uint64_t event_id = 0;
     };

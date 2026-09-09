@@ -18,6 +18,7 @@
 #include <chrono>
 #include <filesystem>
 #include <memory>
+#include <nlohmann/json.hpp>
 #include <string>
 #include <thread>
 #include <vector>
@@ -129,16 +130,12 @@ TEST(EventIntegrationTest, SuccessfulEventFlow)
         std::atomic<int> updatedCount{0};
         std::atomic<int> removedCount{0};
 
-        broker.subscribe(topics::kDocumentIndexed, [&](const Message&) {
-            ++indexedCount;
-            return true;
-        });
-        broker.subscribe(topics::kDocumentUpdated, [&](const Message&) {
-            ++updatedCount;
-            return true;
-        });
-        broker.subscribe(topics::kDocumentRemoved, [&](const Message&) {
-            ++removedCount;
+        broker.subscribe(topics::kDocumentMutations, [&](const Message& msg) {
+            auto j = nlohmann::json::parse(msg.payload);
+            std::cout << "INTEGRATION RECEIVED: " << msg.payload << std::endl;
+            if (j["event_type"] == "document_indexed") ++indexedCount;
+            if (j["event_type"] == "document_updated") ++updatedCount;
+            if (j["event_type"] == "document_removed") ++removedCount;
             return true;
         });
         broker.start();
@@ -187,7 +184,7 @@ TEST(EventIntegrationTest, PersistenceAndRecovery)
         auto coord = make_coord(3, &dispatcher, &store);
         coord->ingest({1, "first doc"});
         coord->ingest({2, "second doc"});
-        lastId = store.create_event("test.topic", "failed_event");
+        lastId = store.create_event("test.topic", "", "failed_event");
         store.mark_dispatching(lastId);
         store.mark_failed(lastId, "broker down");
 
@@ -241,8 +238,9 @@ TEST(EventIntegrationTest, GracefulShutdown)
     InMemoryMessageBroker broker;
 
     std::atomic<int> receivedCount{0};
-    broker.subscribe(topics::kDocumentIndexed, [&](const Message&) {
-        ++receivedCount;
+    broker.subscribe(topics::kDocumentMutations, [&](const Message& msg) {
+        auto j = nlohmann::json::parse(msg.payload);
+        if (j["event_type"] == "document_indexed") ++receivedCount;
         return true;
     });
     broker.start();
@@ -313,8 +311,9 @@ TEST(EventIntegrationTest, ConcurrentMutations)
         InMemoryMessageBroker broker;
 
         std::atomic<int> eventCount{0};
-        broker.subscribe(topics::kDocumentIndexed, [&](const Message&) {
-            ++eventCount;
+        broker.subscribe(topics::kDocumentMutations, [&](const Message& msg) {
+            auto j = nlohmann::json::parse(msg.payload);
+            if (j["event_type"] == "document_indexed") ++eventCount;
             return true;
         });
         broker.start();
@@ -363,8 +362,9 @@ TEST(EventIntegrationTest, InMemoryBrokerFallback)
     // Test that event system works without EventStore (backward compat)
     InMemoryMessageBroker broker;
     std::atomic<int> eventCount{0};
-    broker.subscribe(topics::kDocumentIndexed, [&](const Message&) {
-        ++eventCount;
+    broker.subscribe(topics::kDocumentMutations, [&](const Message& msg) {
+        auto j = nlohmann::json::parse(msg.payload);
+        if (j["event_type"] == "document_indexed") ++eventCount;
         return true;
     });
     broker.start();
@@ -393,8 +393,8 @@ TEST(EventIntegrationTest, CrashRecovery)
     // during clean shutdown (stack unwinding).
     {
         PersistentEventStore store(dir + "/events");
-        store.create_event("topic1", "event1");
-        store.create_event("topic2", "event2");
+        store.create_event("topic1", "", "event1");
+        store.create_event("topic2", "", "event2");
         // Destructor auto-flushes — events survive clean shutdown
     }
 
@@ -407,7 +407,7 @@ TEST(EventIntegrationTest, CrashRecovery)
     // Now create and explicitly flush additional events
     {
         PersistentEventStore store(dir + "/events");
-        store.create_event("topic3", "event3");
+        store.create_event("topic3", "", "event3");
         store.flush();
     }
 

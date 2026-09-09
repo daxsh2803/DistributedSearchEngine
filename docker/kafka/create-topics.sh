@@ -23,36 +23,14 @@ BOOTSTRAP_SERVER="${KAFKA_HOST}:${KAFKA_PORT}"
 echo "Creating Kafka topics on ${BOOTSTRAP_SERVER}..."
 echo ""
 
-# Create documents.indexed topic
-echo "Creating topic: documents.indexed"
+# Create documents.mutations topic
+echo "Creating topic: documents.mutations"
 docker compose -f "$(dirname "$0")/docker-compose.kafka.yml" exec -T kafka \
   /opt/kafka/bin/kafka-topics.sh \
     --bootstrap-server "${BOOTSTRAP_SERVER}" \
     --create \
     --if-not-exists \
-    --topic documents.indexed \
-    --partitions 3 \
-    --replication-factor 1
-
-# Create documents.updated topic
-echo "Creating topic: documents.updated"
-docker compose -f "$(dirname "$0")/docker-compose.kafka.yml" exec -T kafka \
-  /opt/kafka/bin/kafka-topics.sh \
-    --bootstrap-server "${BOOTSTRAP_SERVER}" \
-    --create \
-    --if-not-exists \
-    --topic documents.updated \
-    --partitions 3 \
-    --replication-factor 1
-
-# Create documents.removed topic
-echo "Creating topic: documents.removed"
-docker compose -f "$(dirname "$0")/docker-compose.kafka.yml" exec -T kafka \
-  /opt/kafka/bin/kafka-topics.sh \
-    --bootstrap-server "${BOOTSTRAP_SERVER}" \
-    --create \
-    --if-not-exists \
-    --topic documents.removed \
+    --topic documents.mutations \
     --partitions 3 \
     --replication-factor 1
 
@@ -65,7 +43,7 @@ docker compose -f "$(dirname "$0")/docker-compose.kafka.yml" exec -T kafka \
 
 echo ""
 echo "Topic details:"
-for topic in documents.indexed documents.updated documents.removed; do
+for topic in documents.mutations; do
   echo ""
   echo "=== ${topic} ==="
   docker compose -f "$(dirname "$0")/docker-compose.kafka.yml" exec -T kafka \
