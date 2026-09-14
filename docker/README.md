@@ -81,9 +81,7 @@ docker compose -f docker/docker-compose.kafka.yml exec kafka \
 
 Expected output:
 ```
-documents.indexed
-documents.removed
-documents.updated
+documents.mutations
 ```
 
 ### Describing Topics
@@ -96,15 +94,15 @@ docker compose -f docker/docker-compose.kafka.yml exec kafka \
 # Describe specific topic
 docker compose -f docker/docker-compose.kafka.yml exec kafka \
   /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 \
-  --describe --topic documents.indexed
+  --describe --topic documents.mutations
 ```
 
 Expected output for a topic:
 ```
-Topic: documents.indexed	TopicId: ...	PartitionCount: 3	ReplicationFactor: 1	Configs: segment.bytes=1073741824
-	Topic: documents.indexed	Partition: 0	Leader: 1	Replicas: 1	Isr: 1
-	Topic: documents.indexed	Partition: 1	Leader: 1	Replicas: 1	Isr: 1
-	Topic: documents.indexed	Partition: 2	Leader: 1	Replicas: 1	Isr: 1
+Topic: documents.mutations	TopicId: ...	PartitionCount: 3	ReplicationFactor: 1	Configs: segment.bytes=1073741824
+	Topic: documents.mutations	Partition: 0	Leader: 1	Replicas: 1	Isr: 1
+	Topic: documents.mutations	Partition: 1	Leader: 1	Replicas: 1	Isr: 1
+	Topic: documents.mutations	Partition: 2	Leader: 1	Replicas: 1	Isr: 1
 ```
 
 ### Connecting from Applications
@@ -199,9 +197,7 @@ Apache Kafka 4.0+ uses KRaft (Kafka Raft) for metadata management, replacing Zoo
 
 | Topic | Partitions | Replication | Purpose |
 |-------|-----------|-------------|---------|
-| `documents.indexed` | 3 | 1 | Document indexing events |
-| `documents.updated` | 3 | 1 | Document update events |
-| `documents.removed` | 3 | 1 | Document removal events |
+| `documents.mutations` | 3 | 1 | Unified document mutation events (indexed, updated, removed) |
 
 **Why 3 partitions?**
 - Allows testing multi-partition consumer scenarios
