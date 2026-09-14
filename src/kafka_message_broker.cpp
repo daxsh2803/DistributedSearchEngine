@@ -373,7 +373,7 @@ BrokerStats KafkaMessageBroker::stats() const
         messages_published_.load(std::memory_order_relaxed);
     s.messages_delivered = messages_consumed_.load(std::memory_order_relaxed);
     s.messages_acknowledged = messages_acked_.load(std::memory_order_relaxed);
-    s.messages_retried = 0;  // retries are EventDispatcher's job
+    s.messages_retried = messages_nacked_.load(std::memory_order_relaxed);
     s.messages_dead_lettered = 0;
     s.queue_depth = queue_size("");
     return s;

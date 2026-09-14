@@ -676,6 +676,7 @@ TEST_F(KafkaConsumerTest, SequentialRetryBackoff)
     EXPECT_TRUE(got) << "Second message was never processed (blocked indefinitely?)";
     EXPECT_EQ(first_msg_attempts.load(), 4); // 3 failures + 1 success
     EXPECT_EQ(second_msg_attempts.load(), 1);
+    EXPECT_EQ(consumer_broker.stats().messages_retried, 3u);
 }
 
 // --- 8b. Estimated Lag Test ---
