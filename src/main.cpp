@@ -27,7 +27,10 @@
 #include "metrics.h"
 #include "node_client.h"
 #include "node_config.h"
+#include "node_server.h"
 #include "persistent_event_store.h"
+#include "remote_node.h"
+#include "replica_placement.h"
 #include "event_dispatcher.h"
 #include "shard.h"
 #include "shard_coordinator.h"
@@ -52,11 +55,15 @@
 namespace {
 
 std::atomic<dse::HttpServer*> g_server = nullptr;
+std::atomic<dse::NodeServer*> g_node_server = nullptr;
 
 void signal_handler(int /*signum*/)
 {
     if (auto* srv = g_server.load()) {
         srv->stop();
+    }
+    if (auto* ns = g_node_server.load()) {
+        ns->stop();
     }
 }
 
@@ -159,6 +166,115 @@ std::size_t resolve_shard_count(int argc, char* argv[])
     return 1;
 }
 
+int resolve_node_id(int argc, char* argv[])
+{
+    for (int i = 1; i < argc; ++i) {
+        if (std::string_view(argv[i]) == "--node-id") {
+            if (i + 1 >= argc) {
+                std::cerr << "Missing argument for --node-id\n";
+                return -1;
+            }
+            try {
+                std::size_t idx = 0;
+                const std::string s = argv[i + 1];
+                const int n = std::stoi(s, &idx);
+                if (idx == s.size() && n >= 0) return n;
+                std::cerr << "Invalid node ID: " << argv[i + 1] << "\n";
+                return -1;
+            } catch (...) {
+                std::cerr << "Invalid node ID: " << argv[i + 1] << "\n";
+                return -1;
+            }
+        }
+    }
+    if (const char* env = std::getenv("DSE_NODE_ID")) {
+        try {
+            std::size_t idx = 0;
+            const std::string s = env;
+            const int n = std::stoi(s, &idx);
+            if (idx == s.size() && n >= 0) return n;
+            std::cerr << "Invalid DSE_NODE_ID: " << env << "\n";
+            return -1;
+        } catch (...) {
+            std::cerr << "Invalid DSE_NODE_ID: " << env << "\n";
+            return -1;
+        }
+    }
+    return 0;
+}
+
+int resolve_rpc_port(int argc, char* argv[])
+{
+    for (int i = 1; i < argc; ++i) {
+        if (std::string_view(argv[i]) == "--rpc-port") {
+            if (i + 1 >= argc) {
+                std::cerr << "Missing argument for --rpc-port\n";
+                return -1;
+            }
+            try {
+                std::size_t idx = 0;
+                const std::string s = argv[i + 1];
+                const int p = std::stoi(s, &idx);
+                if (idx == s.size() && p >= 0 && p <= 65535) return p;
+                std::cerr << "Invalid RPC port: " << argv[i + 1] << "\n";
+                return -1;
+            } catch (...) {
+                std::cerr << "Invalid RPC port: " << argv[i + 1] << "\n";
+                return -1;
+            }
+        }
+    }
+    if (const char* env = std::getenv("DSE_RPC_PORT")) {
+        try {
+            std::size_t idx = 0;
+            const std::string s = env;
+            const int p = std::stoi(s, &idx);
+            if (idx == s.size() && p >= 0 && p <= 65535) return p;
+            std::cerr << "Invalid DSE_RPC_PORT: " << env << "\n";
+            return -1;
+        } catch (...) {
+            std::cerr << "Invalid DSE_RPC_PORT: " << env << "\n";
+            return -1;
+        }
+    }
+    return 0;
+}
+
+std::string resolve_peers(int argc, char* argv[])
+{
+    for (int i = 1; i < argc - 1; ++i) {
+        if (std::string_view(argv[i]) == "--peers") {
+            return argv[i + 1];
+        }
+    }
+    if (const char* env = std::getenv("DSE_PEERS")) {
+        return env;
+    }
+    return "";
+}
+
+std::size_t resolve_replica_factor(int argc, char* argv[])
+{
+    for (int i = 1; i < argc - 1; ++i) {
+        if (std::string_view(argv[i]) == "--replica-factor") {
+            try {
+                const int n = std::stoi(argv[i + 1]);
+                if (n > 0) return static_cast<std::size_t>(n);
+            } catch (...) {
+                std::cerr << "Invalid replica factor: " << argv[i + 1] << "\n";
+                return 1;
+            }
+        }
+    }
+    if (const char* env = std::getenv("DSE_REPLICATION_FACTOR")) {
+        try {
+            const int n = std::stoi(env);
+            if (n > 0) return static_cast<std::size_t>(n);
+        } catch (...) {}
+    }
+    return 1;
+}
+
 } // namespace
 
 int main(int argc, char* argv[])
@@ -169,30 +285,125 @@ int main(int argc, char* argv[])
     // --- Resolve configuration ---
     const std::string data_dir = resolve_data_dir(argc, argv);
     const std::size_t shard_count = resolve_shard_count(argc, argv);
+    const int node_id_arg = resolve_node_id(argc, argv);
+    if (node_id_arg < 0) {
+        return 1;
+    }
+    const std::size_t local_node_id = static_cast<std::size_t>(node_id_arg);
+
+    const int rpc_port_arg = resolve_rpc_port(argc, argv);
+    if (rpc_port_arg < 0) {
+        return 1;
+    }
+    const std::string peers_spec = resolve_peers(argc, argv);
+    const std::size_t replica_factor = resolve_replica_factor(argc, argv);
+
     std::cout << "Data directory: " << data_dir << "\n";
     std::cout << "Shard count: " << shard_count << "\n";
+    std::cout << "Node ID: " << local_node_id << "\n";
 
     // --- Create router ---
     auto router = std::make_unique<dse::ShardRouter>(shard_count);
 
-    // --- Create placement: all shards on node 0 (single-node default) ---
-    std::vector<std::size_t> placement(shard_count, 0);
-    auto shard_placement = std::make_unique<dse::ShardPlacement>(
-        shard_count, 1, placement);
-
-    // --- Create node with shards ---
-    auto node = std::make_unique<dse::LocalNode>(0);
-    for (std::size_t i = 0; i < shard_count; ++i) {
-        const std::string path = data_dir + "shard-" + std::to_string(i)
-                                + "/documents.jsonl";
-        node->add_shard(i, std::make_unique<dse::Shard>(path));
-    }
-
-    [[maybe_unused]] auto* local_node_ptr = node.get();
-    [[maybe_unused]] const std::size_t local_node_id = local_node_ptr->node_id();
-
+    std::unique_ptr<dse::LocalNode> local_node;
+    dse::LocalNode* local_node_ptr = nullptr;
     std::vector<std::unique_ptr<dse::NodeClient>> nodes;
-    nodes.push_back(std::move(node));
+    std::unique_ptr<dse::ShardCoordinator> coordinator;
+    int rpc_port = rpc_port_arg;
+    std::size_t node_count = 1;
+
+    if (!peers_spec.empty()) {
+        std::vector<dse::NodeEndpoint> peers;
+        try {
+            peers = dse::parse_peer_topology(peers_spec);
+        } catch (const std::exception& e) {
+            std::cerr << "Failed to parse peer topology: " << e.what() << "\n";
+            return 1;
+        }
+
+        node_count = peers.size();
+
+        if (local_node_id >= node_count || peers[local_node_id].node_id != local_node_id) {
+            std::cerr << "Error: local node ID " << local_node_id
+                      << " does not exist in the configured peer topology ("
+                      << node_count << " nodes configured)\n";
+            return 1;
+        }
+
+        if (rpc_port == 0) {
+            rpc_port = peers[local_node_id].port;
+        }
+
+        if (replica_factor == 0 || replica_factor > node_count) {
+            std::cerr << "Error: replication factor " << replica_factor
+                      << " must be in [1, " << node_count << "]\n";
+            return 1;
+        }
+
+        std::cout << "Node count (peers): " << node_count << "\n";
+        std::cout << "Replication factor: " << replica_factor << "\n";
+        std::cout << "RPC port: " << rpc_port << "\n";
+
+        const auto replica_sets = dse::make_deterministic_replica_sets(
+            shard_count, node_count, replica_factor);
+
+        local_node = std::make_unique<dse::LocalNode>(local_node_id);
+        for (const auto& rs : replica_sets) {
+            bool is_replica = false;
+            for (std::size_t nid : rs.node_ids) {
+                if (nid == local_node_id) {
+                    is_replica = true;
+                    break;
+                }
+            }
+            if (is_replica) {
+                const std::string path = data_dir + "shard-" + std::to_string(rs.shard_id)
+                                        + "/documents.jsonl";
+                local_node->add_shard(rs.shard_id, std::make_unique<dse::Shard>(path));
+            }
+        }
+        // local_node_ptr is non-owning and remains valid because ownership of
+        // local_node is transferred into the nodes vector and then into ShardCoordinator,
+        // whose lifetime extends until after NodeServer is stopped and joined.
+        local_node_ptr = local_node.get();
+
+        nodes.reserve(node_count);
+        for (std::size_t i = 0; i < node_count; ++i) {
+            if (i == local_node_id) {
+                nodes.push_back(std::move(local_node));
+            } else {
+                nodes.push_back(std::make_unique<dse::RemoteNode>(
+                    peers[i].node_id, peers[i].host, peers[i].port));
+            }
+        }
+
+        auto replica_placement = std::make_unique<dse::ShardReplicaPlacement>(
+            shard_count, node_count, replica_factor, replica_sets);
+
+        coordinator = std::make_unique<dse::ShardCoordinator>(
+            std::move(router), std::move(replica_placement), std::move(nodes));
+
+    } else {
+        // Single-node default: all shards on node 0
+        std::vector<std::size_t> placement(shard_count, 0);
+        auto shard_placement = std::make_unique<dse::ShardPlacement>(
+            shard_count, 1, placement);
+
+        local_node = std::make_unique<dse::LocalNode>(0);
+        for (std::size_t i = 0; i < shard_count; ++i) {
+            const std::string path = data_dir + "shard-" + std::to_string(i)
+                                    + "/documents.jsonl";
+            local_node->add_shard(i, std::make_unique<dse::Shard>(path));
+        }
+
+        // local_node_ptr is non-owning and remains valid because ownership is
+        // transferred into nodes and ShardCoordinator, which outlive NodeServer.
+        local_node_ptr = local_node.get();
+        nodes.push_back(std::move(local_node));
+
+        coordinator = std::make_unique<dse::ShardCoordinator>(
+            std::move(router), std::move(shard_placement), std::move(nodes));
+    }
 
     // --- Create metrics collector (shared by coordinator and HTTP server) ---
     dse::MetricsCollector metrics;
@@ -202,9 +413,6 @@ int main(int argc, char* argv[])
     // Recovers PENDING/FAILED events from previous runs on construction.
     dse::PersistentEventStore eventStore(data_dir + "events");
 
-    // --- Create coordinator FIRST (before broker) so we can use node_id ---
-    auto coordinator = std::make_unique<dse::ShardCoordinator>(
-        std::move(router), std::move(shard_placement), std::move(nodes));
     coordinator->set_metrics(&metrics);
     coordinator->set_event_store(&eventStore);
 
@@ -258,28 +466,77 @@ int main(int argc, char* argv[])
 
     // --- Startup recovery: load persisted documents or seed corpus ---
     bool loaded_persistence = false;
+    std::size_t local_persisted_docs = 0;
 
-    // Try loading from persistence paths.
-    coordinator->load_all();
-    if (coordinator->total_document_count() > 0) {
+    // Recover locally hosted persisted shards without remote RPCs.
+    if (local_node_ptr) {
+        for (std::size_t sid = 0; sid < shard_count; ++sid) {
+            if (local_node_ptr->has_shard(sid)) {
+                local_node_ptr->load_shard(sid);
+                const auto count_resp = local_node_ptr->document_count(dse::ShardCountRequest{sid});
+                if (!count_resp.is_error) {
+                    local_persisted_docs += count_resp.document_count;
+                }
+            }
+        }
+    }
+    if (local_persisted_docs > 0) {
         loaded_persistence = true;
     }
 
     if (loaded_persistence) {
-        std::cout << "Loaded " << coordinator->total_document_count()
+        std::cout << "Loaded " << local_persisted_docs
                   << " persisted documents\n";
-    } else {
+    } else if (node_count == 1) {
         std::cout << "No persistence found — loading seed corpus\n";
         load_seed_corpus(*coordinator);
+
         std::cout << "Loaded " << coordinator->total_document_count()
                   << " seed documents\n";
+    } else {
+        std::cout << "Multi-node cluster (" << node_count
+                  << " nodes) — starting with clean cluster state\n";
     }
 
-    // --- Determine the port ---
+    // --- Determine the public port ---
     const int port = resolve_port(argc, argv);
     if (port <= 0 || port > 65535) {
         std::cerr << "Invalid port: " << port << "\n";
         return 1;
+    }
+
+    // --- Start NodeServer (RPC) if configured ---
+    std::unique_ptr<dse::NodeServer> node_server;
+    std::thread node_server_thread;
+    if (rpc_port > 0) {
+        node_server = std::make_unique<dse::NodeServer>(local_node_id, local_node_ptr);
+        g_node_server.store(node_server.get());
+
+        if (!node_server->bind(rpc_port)) {
+            std::cerr << "Failed to bind NodeServer on RPC port " << rpc_port << "\n";
+            g_node_server.store(nullptr);
+            return 1;
+        }
+
+        std::atomic<bool> node_server_failed{false};
+        node_server_thread = std::thread([&node_server, &node_server_failed]() {
+            if (!node_server->listen_after_bind()) {
+                node_server_failed.store(true);
+            }
+        });
+
+        node_server->wait_until_ready();
+        if (node_server_failed.load() || !node_server->is_running()) {
+            std::cerr << "Failed to start NodeServer listener on RPC port " << rpc_port << "\n";
+            g_node_server.store(nullptr);
+            node_server->stop();
+            if (node_server_thread.joinable()) {
+                node_server_thread.join();
+            }
+            return 1;
+        }
+
+        std::cout << "NodeServer listening on http://127.0.0.1:" << node_server->port() << " (RPC)\n";
     }
 
     // --- Start the event system ---
@@ -316,6 +573,15 @@ int main(int argc, char* argv[])
 
     server_thread.join();
     g_server.store(nullptr);
+
+    // Stop and join NodeServer while LocalNode and coordinator are still alive
+    if (node_server) {
+        node_server->stop();
+        if (node_server_thread.joinable()) {
+            node_server_thread.join();
+        }
+        g_node_server.store(nullptr);
+    }
 
     // --- Shutdown event system in correct order ---
     // 1. Stop accepting new events and drain the queue

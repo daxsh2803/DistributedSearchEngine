@@ -44,6 +44,10 @@ public:
     // Construct a node server that delegates to the given LocalNode.
     // The NodeServer takes ownership of the LocalNode.
     NodeServer(std::size_t node_id, std::unique_ptr<LocalNode> local_node);
+
+    // Construct a node server that delegates to an existing LocalNode.
+    // The caller retains ownership; local_node must outlive this server.
+    NodeServer(std::size_t node_id, LocalNode* local_node);
     ~NodeServer();
 
     NodeServer(const NodeServer&) = delete;
@@ -51,7 +55,16 @@ public:
     NodeServer(NodeServer&&) = delete;
     NodeServer& operator=(NodeServer&&) = delete;
 
-    // Start listening on the given port.
+    // Bind to the given port without listening.
+    // port=0 binds to an ephemeral port.
+    // Returns true on success, false if bind failed (e.g. port in use).
+    bool bind(int port);
+
+    // Start listening on an already-bound port.
+    // Blocks until stop() is called.
+    bool listen_after_bind();
+
+    // Start listening on the given port (bind + listen_after_bind).
     // port=0 binds to an ephemeral port.
     // Blocks until stop() is called.
     bool listen(int port);
@@ -61,6 +74,9 @@ public:
 
     // Block until the server is ready to accept connections.
     void wait_until_ready() const;
+
+    // Check if the server is currently running and accepting connections.
+    bool is_running() const;
 
     // The port the server is listening on (after listen()).
     int port() const;
@@ -72,7 +88,8 @@ private:
     void register_routes();
 
     std::size_t node_id_;
-    std::unique_ptr<LocalNode> local_node_;
+    std::unique_ptr<LocalNode> owned_node_;
+    LocalNode* local_node_ = nullptr;
     std::unique_ptr<httplib::Server> server_;
     int port_ = 0;
 };

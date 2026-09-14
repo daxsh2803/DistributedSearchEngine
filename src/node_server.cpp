@@ -36,7 +36,17 @@ void error_response(httplib::Response& res, int status, const std::string& msg)
 
 NodeServer::NodeServer(std::size_t node_id, std::unique_ptr<LocalNode> local_node)
     : node_id_(node_id)
-    , local_node_(std::move(local_node))
+    , owned_node_(std::move(local_node))
+    , local_node_(owned_node_.get())
+    , server_(std::make_unique<httplib::Server>())
+{
+    register_routes();
+}
+
+NodeServer::NodeServer(std::size_t node_id, LocalNode* local_node)
+    : node_id_(node_id)
+    , owned_node_(nullptr)
+    , local_node_(local_node)
     , server_(std::make_unique<httplib::Server>())
 {
     register_routes();
@@ -47,7 +57,7 @@ NodeServer::~NodeServer()
     stop();
 }
 
-bool NodeServer::listen(int port)
+bool NodeServer::bind(int port)
 {
     if (port == 0) {
         const int actual = server_->bind_to_any_port("127.0.0.1");
@@ -57,7 +67,26 @@ bool NodeServer::listen(int port)
         if (!server_->bind_to_port("127.0.0.1", port)) return false;
         port_ = port;
     }
-    return server_->listen_after_bind();
+    return true;
+}
+
+bool NodeServer::listen_after_bind()
+{
+    if (port_ <= 0) {
+        server_->decommission();
+        return false;
+    }
+    const bool ok = server_->listen_after_bind();
+    if (!ok) {
+        server_->decommission();
+    }
+    return ok;
+}
+
+bool NodeServer::listen(int port)
+{
+    if (!bind(port)) return false;
+    return listen_after_bind();
 }
 
 void NodeServer::stop()
@@ -70,6 +99,11 @@ void NodeServer::stop()
 void NodeServer::wait_until_ready() const
 {
     server_->wait_until_ready();
+}
+
+bool NodeServer::is_running() const
+{
+    return server_ ? server_->is_running() : false;
 }
 
 int NodeServer::port() const

@@ -1027,11 +1027,10 @@ TEST_F(KafkaConsumerTest, ConsumerStatistics)
     EXPECT_GE(consumer_broker.rebalance_count(), 0u);
 }
 
-// --- 14. Consumer with handler failure and recovery ---
-// Within a session, consumed messages are NOT redelivered.
-// This test verifies that all messages are consumed and the correct
-// number succeed/fail. Recovery (redelivery of failed messages) only
-// happens across restarts, which is tested in ConsumerRestartRecovery.
+// --- 14. Consumer with handler failure and head-of-line retry ---
+// In Phase 19F, sequential retry ensures that if a handler fails on a message,
+// it is retried repeatedly with backoff and blocks subsequent messages in the partition.
+// The consumer does not skip the failing message.
 
 TEST_F(KafkaConsumerTest, HandlerFailureAndRecovery)
 {
@@ -1042,22 +1041,29 @@ TEST_F(KafkaConsumerTest, HandlerFailureAndRecovery)
     ccfg.client_id = "dse-test-consumer-recover";
     ccfg.group_id = unique_group("recover");
 
-    std::atomic<int> total_received{0};
-    std::atomic<int> success_count{0};
+    std::atomic<int> ok1_processed{0};
+    std::atomic<int> fail_attempts{0};
+    std::atomic<int> ok2_processed{0};
 
     KafkaMessageBroker consumer_broker(ccfg);
     consumer_broker.subscribe(topic, [&](const Message& m) -> bool {
-        ++total_received;
-        // Fail on messages containing "fail"
-        if (m.payload.find("fail") != std::string::npos) {
-            return false;  // no commit
+        if (m.payload.find("ok1") != std::string::npos) {
+            ++ok1_processed;
+            return true;
         }
-        ++success_count;
-        return true;  // commit
+        if (m.payload.find("fail") != std::string::npos) {
+            ++fail_attempts;
+            return false;  // permanently fail to verify head-of-line retry
+        }
+        if (m.payload.find("ok2") != std::string::npos) {
+            ++ok2_processed;
+            return true;
+        }
+        return true;
     });
     consumer_broker.start();
 
-    // Publish 3 messages (1 will fail, 2 will succeed).
+    // Publish 3 messages (ok1, fail, ok2).
     {
         KafkaBrokerConfig pcfg;
         pcfg.bootstrap_servers = "localhost:9094";
@@ -1083,13 +1089,14 @@ TEST_F(KafkaConsumerTest, HandlerFailureAndRecovery)
         producer.stop();
     }
 
-    // All 3 messages consumed (each once).
-    bool got = wait_until([&] { return total_received.load() >= 3; }, 10000);
+    // Wait until the failing message has been retried (at least 2 attempts: initial + 1 retry).
+    bool retried = wait_until([&] { return fail_attempts.load() >= 2; }, 8000);
     consumer_broker.stop();
 
-    EXPECT_TRUE(got);
-    EXPECT_EQ(total_received.load(), 3);
-    EXPECT_EQ(success_count.load(), 2);  // 2 succeed, 1 fails
+    EXPECT_TRUE(retried) << "Failing message was not retried";
+    EXPECT_EQ(ok1_processed.load(), 1);       // first successful message is processed
+    EXPECT_GE(fail_attempts.load(), 2);       // permanently failing message is retried
+    EXPECT_EQ(ok2_processed.load(), 0);       // subsequent message is NOT processed while failing message remains unsuccessful (no implicit skip)
 }
 
 // --- 15. No-broker backward compatibility ---

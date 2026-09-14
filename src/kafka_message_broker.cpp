@@ -264,6 +264,7 @@ void KafkaMessageBroker::consumer_loop()
         std::size_t backoff_ms = 100;
         const std::size_t max_backoff_ms = 5000;
         bool success = false;
+        bool paused = false;
 
         while (consumer_running_.load(std::memory_order_relaxed)) {
             try {
@@ -278,11 +279,22 @@ void KafkaMessageBroker::consumer_loop()
 
             // Failure: pause, backoff, and retry exactly this message.
             ++messages_nacked_;
-            std::this_thread::sleep_for(std::chrono::milliseconds(backoff_ms));
+
+            if (!paused) {
+                consumer_->pause_all();
+                paused = true;
+            }
+
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(backoff_ms));
+
             backoff_ms = std::min(backoff_ms * 2, max_backoff_ms);
 
-            // Keep polling Kafka so we don't get evicted from the consumer group
-            consumer_->poll(0);
+            // DO NOT CALL consumer_->poll() HERE.
+        }
+
+        if (paused) {
+            consumer_->resume_all();
         }
 
         if (success) {

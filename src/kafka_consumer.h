@@ -129,6 +129,14 @@ public:
     // Should be called after successful handler execution.
     void commit();
 
+    // --- Partition control ------------------------------------------------
+
+    // Pause consumption on all currently assigned partitions.
+    void pause_all();
+
+    // Resume consumption on all currently assigned partitions.
+    void resume_all();
+
     // --- Lifecycle --------------------------------------------------------
 
     // Leave consumer group and close. Safe to call multiple times.

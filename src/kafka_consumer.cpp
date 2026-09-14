@@ -277,6 +277,34 @@ void KafkaConsumer::commit() {
 }
 
 // ---------------------------------------------------------------------------
+// Partition control
+// ---------------------------------------------------------------------------
+
+void KafkaConsumer::pause_all() {
+    if (!impl_ || impl_->closed.load() || !impl_->consumer) {
+        return;
+    }
+    std::vector<RdKafka::TopicPartition*> assignment;
+    RdKafka::ErrorCode err = impl_->consumer->assignment(assignment);
+    if (err == RdKafka::ERR_NO_ERROR && !assignment.empty()) {
+        impl_->consumer->pause(assignment);
+    }
+    RdKafka::TopicPartition::destroy(assignment);
+}
+
+void KafkaConsumer::resume_all() {
+    if (!impl_ || impl_->closed.load() || !impl_->consumer) {
+        return;
+    }
+    std::vector<RdKafka::TopicPartition*> assignment;
+    RdKafka::ErrorCode err = impl_->consumer->assignment(assignment);
+    if (err == RdKafka::ERR_NO_ERROR && !assignment.empty()) {
+        impl_->consumer->resume(assignment);
+    }
+    RdKafka::TopicPartition::destroy(assignment);
+}
+
+// ---------------------------------------------------------------------------
 // Lifecycle
 // ---------------------------------------------------------------------------
 

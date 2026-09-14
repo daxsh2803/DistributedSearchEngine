@@ -575,3 +575,64 @@ TEST_F(NodeServerTest, MissingFieldReturns400)
     ASSERT_NE(res, nullptr);
     EXPECT_EQ(res->status, 400);
 }
+
+// ===========================================================================
+// Startup failure and binding
+// ===========================================================================
+
+TEST_F(NodeServerTest, BindSuccessOnEphemeralPort)
+{
+    auto node2 = std::make_unique<LocalNode>(1);
+    node2->add_shard(0, std::make_unique<Shard>());
+    NodeServer server2(1, std::move(node2));
+
+    EXPECT_TRUE(server2.bind(0));
+    EXPECT_GT(server2.port(), 0);
+}
+
+TEST_F(NodeServerTest, BindFailureOnInvalidPort)
+{
+    auto node2 = std::make_unique<LocalNode>(1);
+    node2->add_shard(0, std::make_unique<Shard>());
+    NodeServer server2(1, std::move(node2));
+
+    EXPECT_FALSE(server2.bind(-1));
+}
+
+TEST_F(NodeServerTest, ListenAfterBindWithoutBindFails)
+{
+    auto node2 = std::make_unique<LocalNode>(1);
+    node2->add_shard(0, std::make_unique<Shard>());
+    NodeServer server2(1, std::move(node2));
+
+    EXPECT_FALSE(server2.is_running());
+    EXPECT_FALSE(server2.listen_after_bind());
+    EXPECT_FALSE(server2.is_running());
+}
+
+TEST_F(NodeServerTest, ListenAfterBindLifecycleAndRunningState)
+{
+    auto node2 = std::make_unique<LocalNode>(1);
+    node2->add_shard(0, std::make_unique<Shard>());
+    NodeServer server2(1, std::move(node2));
+
+    ASSERT_TRUE(server2.bind(0));
+    EXPECT_FALSE(server2.is_running());
+
+    std::atomic<bool> failed{false};
+    std::thread th([&server2, &failed]() {
+        if (!server2.listen_after_bind()) {
+            failed.store(true);
+        }
+    });
+
+    server2.wait_until_ready();
+    EXPECT_FALSE(failed.load());
+    EXPECT_TRUE(server2.is_running());
+
+    server2.stop();
+    if (th.joinable()) {
+        th.join();
+    }
+    EXPECT_FALSE(server2.is_running());
+}
