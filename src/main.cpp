@@ -547,7 +547,7 @@ int main(int argc, char* argv[])
     std::cout << "Event system started\n";
 
     // --- Start the HTTP server ---
-    dse::HttpServer server(*coordinator, &metrics, &eventStore);
+    dse::HttpServer server(*coordinator, &metrics, &eventStore, &dispatcher, &broker);
     g_server.store(&server);
 
     std::signal(SIGINT, signal_handler);

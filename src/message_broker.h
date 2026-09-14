@@ -92,6 +92,10 @@ public:
     // Messages in the dead-letter queue for a topic.
     virtual std::vector<Message> dead_letters(const Topic& topic) const = 0;
 
+    // Estimated consumer lag across subscribed partitions/topics.
+    // Default is 0 for brokers without partition lag tracking.
+    virtual std::uint64_t consumer_lag() const { return 0; }
+
     // --- Idempotency ----------------------------------------------------
 
     // Check if a message ID has been successfully processed.

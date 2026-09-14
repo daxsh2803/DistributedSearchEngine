@@ -165,7 +165,7 @@ public:
 
     // Number of rebalance events since construction.
     std::uint64_t rebalance_count() const;
-    std::uint64_t consumer_lag() const;
+    std::uint64_t consumer_lag() const override;
 
 private:
     // Producer poll thread loop: calls client_->poll() periodically.

@@ -8,6 +8,8 @@
 #include <gtest/gtest.h>
 
 #include "http_server.h"
+#include "event_dispatcher.h"
+#include "in_memory_message_broker.h"
 #include "local_node.h"
 #include "metrics.h"
 #include "node_client.h"
@@ -404,4 +406,219 @@ TEST_F(HttpMetricsTest, MetricsExposesAllSnapshotFields)
     // Per-node metrics
     EXPECT_TRUE(j.contains("per_node"));
     EXPECT_TRUE(j["per_node"].is_object());
+}
+
+// ===========================================================================
+// 14. Phase 22: Metrics omits dispatcher and broker fields when not configured
+// ===========================================================================
+
+TEST_F(HttpMetricsTest, MetricsOmitsDispatcherAndBrokerWhenNotConfigured)
+{
+    start_server();
+    const auto [status, body] = get("/metrics");
+    EXPECT_EQ(status, 200);
+
+    const auto j = nlohmann::json::parse(body);
+    EXPECT_FALSE(j.contains("dispatcher_enqueued"));
+    EXPECT_FALSE(j.contains("dispatcher_pending"));
+    EXPECT_FALSE(j.contains("dispatcher_rejected"));
+    EXPECT_FALSE(j.contains("dispatcher_broker_errors"));
+    EXPECT_FALSE(j.contains("dispatcher_retried"));
+    EXPECT_FALSE(j.contains("consumer_lag"));
+    EXPECT_FALSE(j.contains("consumer_messages_consumed"));
+    EXPECT_FALSE(j.contains("consumer_messages_acked"));
+    EXPECT_FALSE(j.contains("consumer_messages_nacked"));
+}
+
+// ===========================================================================
+// 15. Phase 22: Metrics exposes dispatcher fields when EventDispatcher attached
+// ===========================================================================
+
+TEST(HttpMetricsPhase22Test, MetricsExposesDispatcherStatsWhenConfigured)
+{
+    auto coord = make_coordinator(3);
+    MetricsCollector metrics;
+    coord->set_metrics(&metrics);
+
+    BrokerConfig bcfg;
+    bcfg.max_queue_size = 100;
+    InMemoryMessageBroker broker(bcfg);
+
+    EventDispatcher::Config dcfg;
+    dcfg.max_queue_size = 100;
+    EventDispatcher dispatcher(broker, dcfg);
+    dispatcher.start();
+
+    // Enqueue 5 events
+    for (int i = 0; i < 5; ++i) {
+        dispatcher.enqueue("test.topic", "key", "payload_" + std::to_string(i));
+    }
+
+    HttpServer server(*coord, &metrics, nullptr, &dispatcher, nullptr);
+    std::thread th([&server]() { server.listen(0); });
+    server.wait_until_ready();
+
+    httplib::Client client("localhost", server.port());
+    auto res = client.Get("/metrics");
+    ASSERT_TRUE(res);
+    EXPECT_EQ(res->status, 200);
+
+    const auto j = nlohmann::json::parse(res->body);
+    EXPECT_TRUE(j.contains("dispatcher_enqueued"));
+    EXPECT_TRUE(j.contains("dispatcher_pending"));
+    EXPECT_TRUE(j.contains("dispatcher_rejected"));
+    EXPECT_TRUE(j.contains("dispatcher_broker_errors"));
+    EXPECT_TRUE(j.contains("dispatcher_retried"));
+
+    EXPECT_GE(j["dispatcher_enqueued"].get<uint64_t>(), 5u);
+    EXPECT_EQ(j["dispatcher_rejected"].get<uint64_t>(), 0u);
+    EXPECT_EQ(j["dispatcher_broker_errors"].get<uint64_t>(), 0u);
+
+    // Broker was not passed to server, so consumer_* fields must not be present
+    EXPECT_FALSE(j.contains("consumer_lag"));
+    EXPECT_FALSE(j.contains("consumer_messages_consumed"));
+
+    server.stop();
+    if (th.joinable()) th.join();
+    dispatcher.stop();
+}
+
+// ===========================================================================
+// 16. Phase 22: Metrics exposes broker fields when MessageBroker attached
+// ===========================================================================
+
+TEST(HttpMetricsPhase22Test, MetricsExposesBrokerStatsWhenConfigured)
+{
+    auto coord = make_coordinator(3);
+    MetricsCollector metrics;
+    coord->set_metrics(&metrics);
+
+    BrokerConfig bcfg;
+    bcfg.consumer_threads = 1;
+    InMemoryMessageBroker broker(bcfg);
+
+    std::atomic<int> handled{0};
+    broker.subscribe("test.topic", [&handled](const Message&) {
+        handled.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    });
+    broker.start();
+
+    // Publish 3 messages
+    for (int i = 0; i < 3; ++i) {
+        Message m;
+        m.topic = "test.topic";
+        m.payload = "data_" + std::to_string(i);
+        broker.publish(std::move(m));
+    }
+
+    // Wait for consumer to process them
+    for (int i = 0; i < 50 && handled.load() < 3; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    HttpServer server(*coord, &metrics, nullptr, nullptr, &broker);
+    std::thread th([&server]() { server.listen(0); });
+    server.wait_until_ready();
+
+    httplib::Client client("localhost", server.port());
+    auto res = client.Get("/metrics");
+    ASSERT_TRUE(res);
+    EXPECT_EQ(res->status, 200);
+
+    const auto j = nlohmann::json::parse(res->body);
+    EXPECT_TRUE(j.contains("consumer_lag"));
+    EXPECT_TRUE(j.contains("consumer_messages_consumed"));
+    EXPECT_TRUE(j.contains("consumer_messages_acked"));
+    EXPECT_TRUE(j.contains("consumer_messages_nacked"));
+
+    EXPECT_EQ(j["consumer_lag"].get<uint64_t>(), 0u);
+    EXPECT_GE(j["consumer_messages_consumed"].get<uint64_t>(), 3u);
+    EXPECT_GE(j["consumer_messages_acked"].get<uint64_t>(), 3u);
+    EXPECT_EQ(j["consumer_messages_nacked"].get<uint64_t>(), 0u);
+
+    // Dispatcher was not passed, so dispatcher_* fields must not be present
+    EXPECT_FALSE(j.contains("dispatcher_enqueued"));
+
+    server.stop();
+    if (th.joinable()) th.join();
+    broker.stop();
+}
+
+// ===========================================================================
+// 17. Phase 22: Concurrent /metrics requests while dispatcher & broker are active
+// ===========================================================================
+
+TEST(HttpMetricsPhase22Test, ConcurrentMetricsRequestsWithActiveDispatcherAndBroker)
+{
+    auto coord = make_coordinator(3);
+    MetricsCollector metrics;
+    coord->set_metrics(&metrics);
+
+    BrokerConfig bcfg;
+    bcfg.consumer_threads = 2;
+    InMemoryMessageBroker broker(bcfg);
+
+    broker.subscribe("concurrent.topic", [](const Message&) {
+        return true;
+    });
+    broker.start();
+
+    EventDispatcher::Config dcfg;
+    EventDispatcher dispatcher(broker, dcfg);
+    dispatcher.start();
+
+    HttpServer server(*coord, &metrics, nullptr, &dispatcher, &broker);
+    std::thread th([&server]() { server.listen(0); });
+    server.wait_until_ready();
+
+    std::atomic<bool> keep_running{true};
+
+    // Background thread producing writes and events
+    std::thread producer([&coord, &dispatcher, &keep_running]() {
+        int i = 0;
+        while (keep_running.load(std::memory_order_relaxed)) {
+            coord->ingest({static_cast<doc_id>(1000 + (i % 100)), "document content " + std::to_string(i)});
+            dispatcher.enqueue("concurrent.topic", "k", "val_" + std::to_string(i));
+            ++i;
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+    });
+
+    // Multiple client threads reading /metrics
+    constexpr int kReaderThreads = 4;
+    std::vector<std::thread> readers;
+    std::atomic<int> success_count{0};
+
+    for (int r = 0; r < kReaderThreads; ++r) {
+        readers.emplace_back([&server, &success_count]() {
+            httplib::Client client("localhost", server.port());
+            client.set_connection_timeout(5);
+            client.set_read_timeout(5);
+            for (int req = 0; req < 20; ++req) {
+                auto res = client.Get("/metrics");
+                if (res && res->status == 200) {
+                    const auto j = nlohmann::json::parse(res->body);
+                    if (j.contains("dispatcher_enqueued") && j.contains("consumer_messages_consumed")) {
+                        success_count.fetch_add(1, std::memory_order_relaxed);
+                    }
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+        });
+    }
+
+    for (auto& rth : readers) {
+        rth.join();
+    }
+
+    keep_running.store(false);
+    producer.join();
+
+    EXPECT_EQ(success_count.load(), kReaderThreads * 20);
+
+    server.stop();
+    if (th.joinable()) th.join();
+    dispatcher.stop();
+    broker.stop();
 }

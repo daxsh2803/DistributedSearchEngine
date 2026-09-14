@@ -8,7 +8,9 @@
 // portable across all platforms including MinGW/MSYS2.
 
 #include "http_server.h"
+#include "event_dispatcher.h"
 #include "event_store.h"
+#include "message_broker.h"
 #include "metrics.h"
 #include "shard_coordinator.h"
 
@@ -87,10 +89,14 @@ void error_response(httplib::Response& res, int status, const std::string& msg)
 
 HttpServer::HttpServer(ShardCoordinator& coordinator,
                        MetricsCollector* metrics,
-                       EventStore* eventStore)
+                       EventStore* eventStore,
+                       EventDispatcher* dispatcher,
+                       MessageBroker* broker)
     : coordinator_(coordinator)
     , metrics_(metrics)
     , eventStore_(eventStore)
+    , dispatcher_(dispatcher)
+    , broker_(broker)
     , server_(std::make_unique<httplib::Server>())
 {
     register_routes();
@@ -229,6 +235,25 @@ void HttpServer::register_routes()
             j["events_failed"] = eventStats.failed;
             j["events_retried"] = eventStats.retried;
             j["events_replayed"] = eventStats.replayed;
+        }
+
+        // Event dispatcher metrics (Phase 22)
+        if (dispatcher_) {
+            const auto dStats = dispatcher_->stats();
+            j["dispatcher_enqueued"] = dStats.enqueued;
+            j["dispatcher_pending"] = dStats.pending;
+            j["dispatcher_rejected"] = dStats.rejected;
+            j["dispatcher_broker_errors"] = dStats.broker_errors;
+            j["dispatcher_retried"] = dStats.retried;
+        }
+
+        // Broker and consumer metrics (Phase 22)
+        if (broker_) {
+            const auto bStats = broker_->stats();
+            j["consumer_lag"] = broker_->consumer_lag();
+            j["consumer_messages_consumed"] = bStats.messages_delivered;
+            j["consumer_messages_acked"] = bStats.messages_acknowledged;
+            j["consumer_messages_nacked"] = bStats.messages_retried;
         }
 
         res.status = 200;

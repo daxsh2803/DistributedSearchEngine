@@ -29,21 +29,30 @@ namespace dse {
 class ShardCoordinator;
 class MetricsCollector;
 class EventStore;
+class EventDispatcher;
+class MessageBroker;
 
 class HttpServer {
 public:
     // Construct with optional MetricsCollector for /metrics endpoint.
     // When metrics is nullptr, /metrics returns HTTP 503.
     // When eventStore is nullptr, event metrics are omitted from /metrics.
+    // When dispatcher is nullptr, dispatcher metrics are omitted from /metrics.
+    // When broker is nullptr, consumer metrics are omitted from /metrics.
     explicit HttpServer(ShardCoordinator& coordinator,
                         MetricsCollector* metrics = nullptr,
-                        EventStore* eventStore = nullptr);
+                        EventStore* eventStore = nullptr,
+                        EventDispatcher* dispatcher = nullptr,
+                        MessageBroker* broker = nullptr);
     ~HttpServer();
 
     HttpServer(const HttpServer&) = delete;
     HttpServer& operator=(const HttpServer&) = delete;
     HttpServer(HttpServer&&) = delete;
     HttpServer& operator=(HttpServer&&) = delete;
+
+    void set_event_dispatcher(EventDispatcher* dispatcher) { dispatcher_ = dispatcher; }
+    void set_message_broker(MessageBroker* broker) { broker_ = broker; }
 
     bool listen(int port);
     void stop();
@@ -54,8 +63,10 @@ private:
     void register_routes();
 
     ShardCoordinator& coordinator_;
-    MetricsCollector* metrics_ = nullptr;  // optional, not owned
-    EventStore* eventStore_ = nullptr;      // optional, not owned
+    MetricsCollector* metrics_ = nullptr;     // optional, not owned
+    EventStore* eventStore_ = nullptr;         // optional, not owned
+    EventDispatcher* dispatcher_ = nullptr;    // optional, not owned
+    MessageBroker* broker_ = nullptr;          // optional, not owned
     std::unique_ptr<httplib::Server> server_;
     int port_ = 0;
 };
