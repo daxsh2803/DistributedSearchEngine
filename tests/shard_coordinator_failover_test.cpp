@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <cmath>
 #include <cstddef>
 #include <memory>
 #include <string>
@@ -1041,6 +1042,259 @@ TEST(CoordinatorFailoverTest, Phase24_AllReplicasFailNoFailoverMetric)
 
     const auto snap = metrics.snapshot();
     EXPECT_EQ(snap.read_failovers_total, 0u);
+}
+
+// ===========================================================================
+// Phase 25: Search Result Correctness & Partial-Availability Semantics
+// ===========================================================================
+
+// 1. AND Query Partial Availability:
+// Controlled multi-shard scenario where one shard is unavailable.
+// Verifies:
+// - Search does not become an unexpected transport/application error
+// - response.complete == false
+// - response.errors identifies the failed shard
+// - Available shard results are handled according to existing semantics
+// - AND processing remains correct over the available search data
+// Note: Partial results are NOT claimed to be equivalent to a complete-cluster query.
+TEST(CoordinatorFailoverTest, Phase25_AndQueryPartialAvailability)
+{
+    // 2 shards: Shard 0 (healthy), Shard 1 (failing).
+    auto router = std::make_unique<ShardRouter>(2);
+    std::vector<ShardReplicaSet> replica_sets = {
+        {0, {0}},
+        {1, {1}},
+    };
+    auto placement = std::make_unique<ShardReplicaPlacement>(2, 2, 1, replica_sets);
+
+    // Shard 0: LocalNode with documents
+    auto local0 = std::make_unique<LocalNode>(0);
+    auto s0 = std::make_unique<Shard>();
+    // doc 10 contains both "apple" and "orange" (and "banana")
+    s0->add_document(10, "apple orange banana");
+    // doc 20 contains both "apple" and "orange"
+    s0->add_document(20, "apple orange");
+    // doc 30 contains only "apple"
+    s0->add_document(30, "apple mango");
+    local0->add_shard(0, std::move(s0));
+    local0->add_shard(1, std::make_unique<Shard>());
+    auto n0 = std::make_unique<InspectableNode>(0, std::move(local0));
+
+    // Shard 1: FailingNode (simulating total unavailability of Shard 1)
+    auto n1 = std::make_unique<FailingNode>(1);
+
+    std::vector<std::unique_ptr<NodeClient>> nodes;
+    nodes.push_back(std::move(n0));
+    nodes.push_back(std::move(n1));
+    auto coord = std::make_unique<ShardCoordinator>(
+        std::move(router), std::move(placement), std::move(nodes));
+
+    SearchRequest req;
+    req.query = "apple orange";
+    req.mode = SearchMode::And;
+    req.limit = 10;
+    const auto resp = coord->search(req);
+
+    // Search request succeeds at coordinator level without unhandled crash.
+    EXPECT_FALSE(resp.is_error);
+
+    // Marked incomplete because Shard 1 operations failed.
+    EXPECT_FALSE(resp.complete);
+
+    // Errors list identifies the failed shard.
+    ASSERT_FALSE(resp.errors.empty());
+    bool found_shard1_error = false;
+    for (const auto& err : resp.errors) {
+        if (err.shard_id == 1) {
+            found_shard1_error = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(found_shard1_error);
+
+    // AND processing correctly intersects available postings:
+    // doc 10 and doc 20 contain both "apple" and "orange".
+    // doc 30 contains only "apple" and is excluded by AND intersection.
+    EXPECT_EQ(resp.total, 2u);
+    ASSERT_EQ(resp.results.size(), 2u);
+    EXPECT_TRUE(resp.results[0].document_id == 10 || resp.results[0].document_id == 20);
+    EXPECT_TRUE(resp.results[1].document_id == 10 || resp.results[1].document_id == 20);
+    EXPECT_NE(resp.results[0].document_id, resp.results[1].document_id);
+    for (const auto& r : resp.results) {
+        EXPECT_NE(r.document_id, 30u);
+        EXPECT_GT(r.score, 0.0);
+    }
+}
+
+// 2. OR Query Partial Availability:
+// Controlled multi-shard scenario where one shard is unavailable.
+// Verifies:
+// - response.complete == false
+// - response.errors identifies the failed shard
+// - Available shard results are still returned according to existing semantics
+// - OR processing correctly aggregates available postings
+// Note: Partial results are NOT claimed to be equivalent to a complete-cluster query.
+TEST(CoordinatorFailoverTest, Phase25_OrQueryPartialAvailability)
+{
+    // 2 shards: Shard 0 (healthy), Shard 1 (failing).
+    auto router = std::make_unique<ShardRouter>(2);
+    std::vector<ShardReplicaSet> replica_sets = {
+        {0, {0}},
+        {1, {1}},
+    };
+    auto placement = std::make_unique<ShardReplicaPlacement>(2, 2, 1, replica_sets);
+
+    // Shard 0: LocalNode with documents
+    auto local0 = std::make_unique<LocalNode>(0);
+    auto s0 = std::make_unique<Shard>();
+    s0->add_document(10, "apple grape");
+    s0->add_document(20, "orange peach");
+    s0->add_document(30, "banana kiwi");
+    local0->add_shard(0, std::move(s0));
+    local0->add_shard(1, std::make_unique<Shard>());
+    auto n0 = std::make_unique<InspectableNode>(0, std::move(local0));
+
+    // Shard 1: FailingNode (simulating total unavailability of Shard 1)
+    auto n1 = std::make_unique<FailingNode>(1);
+
+    std::vector<std::unique_ptr<NodeClient>> nodes;
+    nodes.push_back(std::move(n0));
+    nodes.push_back(std::move(n1));
+    auto coord = std::make_unique<ShardCoordinator>(
+        std::move(router), std::move(placement), std::move(nodes));
+
+    SearchRequest req;
+    req.query = "apple orange";
+    req.mode = SearchMode::Or;
+    req.limit = 10;
+    const auto resp = coord->search(req);
+
+    EXPECT_FALSE(resp.is_error);
+    EXPECT_FALSE(resp.complete);
+
+    ASSERT_FALSE(resp.errors.empty());
+    bool found_shard1_error = false;
+    for (const auto& err : resp.errors) {
+        if (err.shard_id == 1) {
+            found_shard1_error = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(found_shard1_error);
+
+    // OR processing correctly unions available postings:
+    // doc 10 matches "apple", doc 20 matches "orange", doc 30 matches neither.
+    EXPECT_EQ(resp.total, 2u);
+    ASSERT_EQ(resp.results.size(), 2u);
+    EXPECT_TRUE(resp.results[0].document_id == 10 || resp.results[0].document_id == 20);
+    EXPECT_TRUE(resp.results[1].document_id == 10 || resp.results[1].document_id == 20);
+    EXPECT_NE(resp.results[0].document_id, resp.results[1].document_id);
+    for (const auto& r : resp.results) {
+        EXPECT_NE(r.document_id, 30u);
+        EXPECT_GT(r.score, 0.0);
+    }
+}
+
+// 3. TF-IDF Failure Window:
+// Controlled scenario where:
+//   compute_global_n() -> target shard succeeds
+//   collect_postings() -> the same pinned shard fails
+//
+// Verifies:
+// 1. response.complete == false
+// 2. The failure is represented in response.errors
+// 3. The returned result/scoring reflects the ACTUAL CURRENT implementation:
+//    score = tf * log(global_n / df) = 1.0 * log(3.0 / 1.0) = log(3.0)
+// 4. Documents that Global N includes documents from a shard whose postings
+//    subsequently became unavailable.
+// 5. Does NOT describe the resulting score as mathematically equivalent to the
+//    available subset (which would be log(1.0 / 1.0) = 0.0).
+// 6. Does NOT change the TF-IDF implementation, locking in existing partial semantics.
+TEST(CoordinatorFailoverTest, Phase25_TfIdfScoringUnderPartialAvailability)
+{
+    // 2 shards: Shard 0 (healthy), Shard 1 (succeeds count, fails search).
+    auto router = std::make_unique<ShardRouter>(2);
+    std::vector<ShardReplicaSet> replica_sets = {
+        {0, {0}},
+        {1, {1}},
+    };
+    auto placement = std::make_unique<ShardReplicaPlacement>(2, 2, 1, replica_sets);
+
+    // Shard 0: 1 document containing "quantum"
+    auto local0 = std::make_unique<LocalNode>(0);
+    auto s0 = std::make_unique<Shard>();
+    s0->add_document(100, "quantum computing");
+    local0->add_shard(0, std::move(s0));
+    local0->add_shard(1, std::make_unique<Shard>());
+    auto n0 = std::make_unique<InspectableNode>(0, std::move(local0));
+
+    // Shard 1: 2 documents containing data
+    auto local1 = std::make_unique<LocalNode>(1);
+    local1->add_shard(0, std::make_unique<Shard>());
+    auto s1 = std::make_unique<Shard>();
+    s1->add_document(201, "quantum mechanics");
+    s1->add_document(202, "classical mechanics");
+    local1->add_shard(1, std::move(s1));
+    auto n1 = std::make_unique<InspectableNode>(1, std::move(local1));
+
+    // Node 1 configuration: succeeds document_count (N=2), but fails search!
+    n1->set_fail_count(false);
+    n1->set_fail_search(true);
+
+    auto* p1 = n1.get();
+
+    std::vector<std::unique_ptr<NodeClient>> nodes;
+    nodes.push_back(std::move(n0));
+    nodes.push_back(std::move(n1));
+    auto coord = std::make_unique<ShardCoordinator>(
+        std::move(router), std::move(placement), std::move(nodes));
+
+    SearchRequest req;
+    req.query = "quantum";
+    req.mode = SearchMode::Or;
+    req.limit = 10;
+    const auto resp = coord->search(req);
+
+    // 1. Search request completed at coordinator level, but marked incomplete.
+    EXPECT_FALSE(resp.is_error);
+    EXPECT_FALSE(resp.complete);
+
+    // 2. Node 1 served count successfully, but failed search.
+    EXPECT_EQ(p1->count_calls.load(), 1u);
+    EXPECT_EQ(p1->search_calls.load(), 1u);
+
+    // 3. Failure is recorded in errors with shard_id == 1 and category == "search_failure".
+    ASSERT_FALSE(resp.errors.empty());
+    bool found_search_failure = false;
+    for (const auto& err : resp.errors) {
+        if (err.shard_id == 1 && err.category == "search_failure") {
+            found_search_failure = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(found_search_failure);
+
+    // 4. Exactly 1 result returned (doc 100 from Shard 0).
+    EXPECT_EQ(resp.total, 1u);
+    ASSERT_EQ(resp.results.size(), 1u);
+    EXPECT_EQ(resp.results[0].document_id, 100u);
+
+    // 5. Score reflects the ACTUAL CURRENT implementation:
+    //    global_n = 1 (Shard 0) + 2 (Shard 1) = 3.0
+    //    df = 1.0 (only Shard 0 postings collected; Shard 1 failed)
+    //    idf = std::log(3.0 / 1.0) = std::log(3.0)
+    //    tf = 1.0
+    //    score = 1.0 * std::log(3.0) ≈ 1.098612...
+    const double expected_actual_score = 1.0 * std::log(3.0 / 1.0);
+    EXPECT_NEAR(resp.results[0].score, expected_actual_score, 1e-6);
+
+    // 6. Documents that Global N includes documents from a shard whose postings
+    //    subsequently became unavailable.
+    //    If Global N had been calculated only over shards whose postings succeeded,
+    //    N would be 1.0, df would be 1.0, and idf would be log(1.0 / 1.0) = 0.0.
+    const double score_if_recalculated = 1.0 * std::log(1.0 / 1.0);
+    EXPECT_DOUBLE_EQ(score_if_recalculated, 0.0);
+    EXPECT_NE(resp.results[0].score, score_if_recalculated);
 }
 
 } // namespace
