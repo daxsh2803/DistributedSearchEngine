@@ -368,13 +368,21 @@ TEST_F(LoadManagementTest, NodeServerUnchangedAndNotLoadShed)
 
 TEST_F(LoadManagementTest, HighConcurrencyStressShedding)
 {
-    // Define a node that sleeps during search to hold request slots,
+    // Define a node that explicitly waits for a release signal,
     // guaranteeing deterministic saturation for the test.
-    class SlowNode : public LocalNode {
+    class BlockingNode : public LocalNode {
     public:
-        explicit SlowNode(std::size_t id) : LocalNode(id) {}
+        std::atomic<std::size_t> active_in_search{0};
+        std::atomic<bool> release_search{false};
+
+        explicit BlockingNode(std::size_t id) : LocalNode(id) {}
+
         ShardSearchResponse search(const ShardSearchRequest& req) override {
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            active_in_search.fetch_add(1, std::memory_order_relaxed);
+            while (!release_search.load(std::memory_order_relaxed)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            active_in_search.fetch_sub(1, std::memory_order_relaxed);
             return LocalNode::search(req);
         }
     };
@@ -382,11 +390,16 @@ TEST_F(LoadManagementTest, HighConcurrencyStressShedding)
     auto router = std::make_unique<ShardRouter>(1);
     std::vector<std::size_t> placement = {0};
     auto shard_placement = std::make_unique<ShardPlacement>(1, 1, placement);
-    auto slow_node = std::make_unique<SlowNode>(0);
-    slow_node->add_shard(0, std::make_unique<Shard>());
+    auto blocking_node = std::make_unique<BlockingNode>(0);
+    auto* blocking_node_ptr = blocking_node.get();
+
+    auto shard = std::make_unique<Shard>();
+    shard->add_document(1, "test"); // Contains the query term
+
+    blocking_node->add_shard(0, std::move(shard));
 
     std::vector<std::unique_ptr<NodeClient>> nodes;
-    nodes.push_back(std::move(slow_node));
+    nodes.push_back(std::move(blocking_node));
 
     coordinator_ = std::make_unique<ShardCoordinator>(
         std::move(router), std::move(shard_placement), std::move(nodes));
@@ -397,51 +410,63 @@ TEST_F(LoadManagementTest, HighConcurrencyStressShedding)
     create_server(kLimit);
     start_server();
 
-    constexpr int kNumClients = 24;
-    constexpr int kRequestsPerClient = 10;
-
     std::atomic<int> accepted{0};
     std::atomic<int> rejected{0};
 
-    std::vector<std::thread> clients;
-    clients.reserve(kNumClients);
+    auto client_task = [this, &accepted, &rejected](std::size_t id, bool is_blocker) {
+        httplib::Client client("localhost", server_->port());
+        client.set_read_timeout(5);
+        auto res = client.Get("/search?q=test");
+        if (res && res->status == 200) {
+            accepted.fetch_add(1);
+        } else if (res && res->status == 429) {
+            rejected.fetch_add(1, std::memory_order_relaxed);
+        }
+    };
 
-    for (int c = 0; c < kNumClients; ++c) {
-        clients.emplace_back([this, c, &accepted, &rejected]() {
-            // Use 127.0.0.1 instead of localhost to bypass DNS/IPv6 fallback delays
-            httplib::Client client("127.0.0.1", server_->port());
-            client.set_connection_timeout(5);
-            client.set_read_timeout(5);
-
-            for (int r = 0; r < kRequestsPerClient; ++r) {
-                auto res = client.Get("/search?q=test");
-                if (res) {
-                    if (res->status == 200) {
-                        accepted.fetch_add(1, std::memory_order_relaxed);
-                    } else if (res->status == 429) {
-                        rejected.fetch_add(1, std::memory_order_relaxed);
-                    }
-                }
-            }
-        });
+    // 1. Launch blockers
+    std::vector<std::thread> blockers;
+    for (std::size_t i = 0; i < kLimit; ++i) {
+        blockers.emplace_back(client_task, i, true);
     }
 
-    for (auto& t : clients) {
-        t.join();
+    // Wait until they are all successfully blocking inside search()
+    std::size_t wait_iters = 0;
+    while (blocking_node_ptr->active_in_search.load(std::memory_order_relaxed) < kLimit) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if (++wait_iters > 5000) break;
     }
 
-    // Both accepted and rejected requests must have occurred
-    EXPECT_GT(accepted.load(), 0);
-    EXPECT_GT(rejected.load(), 0);
-    EXPECT_EQ(accepted.load() + rejected.load(), kNumClients * kRequestsPerClient);
+    EXPECT_EQ(blocking_node_ptr->active_in_search.load(std::memory_order_relaxed), kLimit);
 
-    // Rejection count matches metric
-    EXPECT_EQ(server_->load_shed_rejections(), static_cast<std::uint64_t>(rejected.load()));
-    EXPECT_EQ(metrics_->snapshot().load_shed_rejections_total,
-              static_cast<std::uint64_t>(rejected.load()));
+    // 2. Launch overflowers while slots are held
+    std::vector<std::thread> overflowers;
+    constexpr std::size_t kOverflowClients = 4;
+    for (std::size_t i = 0; i < kOverflowClients; ++i) {
+        overflowers.emplace_back(client_task, kLimit + i, false);
+    }
+
+    // Overflowers should return 429 immediately because limits are saturated
+    for (auto& t : overflowers) {
+        if (t.joinable()) t.join();
+    }
+
+    // 3. Release blockers and let them finish
+    blocking_node_ptr->release_search.store(true, std::memory_order_relaxed);
+    for (auto& t : blockers) {
+        if (t.joinable()) t.join();
+    }
+
+    // 5. Verify the exact invariant: exactly kLimit accepted, exactly kOverflowClients rejected.
+    EXPECT_EQ(accepted.load(), static_cast<int>(kLimit));
+    EXPECT_EQ(rejected.load(), kOverflowClients);
+
+    EXPECT_EQ(server_->load_shed_rejections(), static_cast<std::uint64_t>(kOverflowClients));
+    EXPECT_EQ(metrics_->snapshot().load_shed_rejections_total, static_cast<std::uint64_t>(kOverflowClients));
 
     // When all clients finish, active requests must return to 0
     EXPECT_EQ(server_->active_requests(), 0u);
+    std::cout << "Test logic complete." << std::endl;
 }
 
 } // namespace
