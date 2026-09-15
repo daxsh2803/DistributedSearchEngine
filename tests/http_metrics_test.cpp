@@ -165,6 +165,8 @@ TEST_F(HttpMetricsTest, MetricsExposesCoordinatorSearchMetrics)
     EXPECT_TRUE(j.contains("coordinator_search_incomplete"));
     EXPECT_TRUE(j.contains("coordinator_search_errors"));
     EXPECT_TRUE(j.contains("coordinator_search_latency"));
+    EXPECT_TRUE(j.contains("load_shed_rejections_total"));
+    EXPECT_EQ(j["load_shed_rejections_total"], 0u);
 }
 
 // ===========================================================================

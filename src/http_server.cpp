@@ -81,6 +81,44 @@ void error_response(httplib::Response& res, int status, const std::string& msg)
     res.set_content(err.dump(), "application/json");
 }
 
+// RAII guard for thread-safe acquisition and release of concurrency slots.
+// Acquires a slot atomically via compare-exchange loop (zero-lock).
+// Releases the slot unconditionally on destruction.
+class RequestSlotGuard {
+public:
+    RequestSlotGuard(std::atomic<std::size_t>& active, std::size_t max_concurrent)
+        : active_(active)
+    {
+        std::size_t current = active_.load(std::memory_order_relaxed);
+        while (current < max_concurrent) {
+            if (active_.compare_exchange_weak(current, current + 1,
+                                             std::memory_order_acquire,
+                                             std::memory_order_relaxed)) {
+                acquired_ = true;
+                return;
+            }
+        }
+    }
+
+    ~RequestSlotGuard()
+    {
+        if (acquired_) {
+            active_.fetch_sub(1, std::memory_order_release);
+        }
+    }
+
+    RequestSlotGuard(const RequestSlotGuard&) = delete;
+    RequestSlotGuard& operator=(const RequestSlotGuard&) = delete;
+    RequestSlotGuard(RequestSlotGuard&&) = delete;
+    RequestSlotGuard& operator=(RequestSlotGuard&&) = delete;
+
+    bool acquired() const { return acquired_; }
+
+private:
+    std::atomic<std::size_t>& active_;
+    bool acquired_ = false;
+};
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -91,7 +129,8 @@ HttpServer::HttpServer(ShardCoordinator& coordinator,
                        MetricsCollector* metrics,
                        EventStore* eventStore,
                        EventDispatcher* dispatcher,
-                       MessageBroker* broker)
+                       MessageBroker* broker,
+                       std::size_t max_concurrent_requests)
     : coordinator_(coordinator)
     , metrics_(metrics)
     , eventStore_(eventStore)
@@ -99,7 +138,33 @@ HttpServer::HttpServer(ShardCoordinator& coordinator,
     , broker_(broker)
     , server_(std::make_unique<httplib::Server>())
 {
+    if (max_concurrent_requests > 0) {
+        max_concurrent_requests_ = max_concurrent_requests;
+    } else if (const char* env = std::getenv("DSE_MAX_CONCURRENT_REQUESTS")) {
+        try {
+            const int val = std::stoi(env);
+            if (val > 0) {
+                max_concurrent_requests_ = static_cast<std::size_t>(val);
+            }
+        } catch (...) {
+            // Keep default on parse error
+        }
+    }
+
+    const std::size_t worker_threads = std::max<std::size_t>(128, max_concurrent_requests_ * 2);
+    server_->new_task_queue = [worker_threads] {
+        return new httplib::ThreadPool(worker_threads);
+    };
+
     register_routes();
+}
+
+void HttpServer::record_load_shed_rejection()
+{
+    load_shed_rejections_total_.fetch_add(1, std::memory_order_relaxed);
+    if (metrics_) {
+        metrics_->record_load_shed_rejection();
+    }
 }
 
 HttpServer::~HttpServer()
@@ -186,6 +251,9 @@ void HttpServer::register_routes()
         // Read failover metrics (Phase 24)
         j["read_failovers_total"] = snap.read_failovers_total;
 
+        // Load shed metrics (Phase 27)
+        j["load_shed_rejections_total"] = snap.load_shed_rejections_total;
+
         // Circuit breaker metrics
         j["circuit_open_events"] = snap.circuit_open_events;
         j["circuit_close_events"] = snap.circuit_close_events;
@@ -266,6 +334,13 @@ void HttpServer::register_routes()
     // --- GET /search ---
     server_->Get("/search", [this](const httplib::Request& req,
                                     httplib::Response& res) {
+        RequestSlotGuard slot(active_requests_, max_concurrent_requests_);
+        if (!slot.acquired()) {
+            record_load_shed_rejection();
+            error_response(res, 429, "Too many requests: concurrency limit reached");
+            return;
+        }
+
         SearchRequest request;
         request.query = req.get_param_value("q");
 
@@ -310,6 +385,13 @@ void HttpServer::register_routes()
     // --- POST /documents ---
     server_->Post("/documents", [this](const httplib::Request& req,
                                         httplib::Response& res) {
+        RequestSlotGuard slot(active_requests_, max_concurrent_requests_);
+        if (!slot.acquired()) {
+            record_load_shed_rejection();
+            error_response(res, 429, "Too many requests: concurrency limit reached");
+            return;
+        }
+
         try {
             nlohmann::json body;
             try {
@@ -359,6 +441,13 @@ void HttpServer::register_routes()
     // --- PUT /documents/:id ---
     server_->Put("/documents/:id", [this](const httplib::Request& req,
                                            httplib::Response& res) {
+        RequestSlotGuard slot(active_requests_, max_concurrent_requests_);
+        if (!slot.acquired()) {
+            record_load_shed_rejection();
+            error_response(res, 429, "Too many requests: concurrency limit reached");
+            return;
+        }
+
         try {
             const auto it = req.path_params.find("id");
             if (it == req.path_params.end()) {
@@ -416,6 +505,13 @@ void HttpServer::register_routes()
     // --- DELETE /documents/:id ---
     server_->Delete("/documents/:id", [this](const httplib::Request& req,
                                               httplib::Response& res) {
+        RequestSlotGuard slot(active_requests_, max_concurrent_requests_);
+        if (!slot.acquired()) {
+            record_load_shed_rejection();
+            error_response(res, 429, "Too many requests: concurrency limit reached");
+            return;
+        }
+
         try {
             const auto it = req.path_params.find("id");
             if (it == req.path_params.end()) {

@@ -48,6 +48,7 @@ TEST(MetricsTest, InitialSnapshotIsZero)
     EXPECT_EQ(snap.write_errors, 0u);
     EXPECT_EQ(snap.retries_total, 0u);
     EXPECT_EQ(snap.read_failovers_total, 0u);
+    EXPECT_EQ(snap.load_shed_rejections_total, 0u);
     EXPECT_EQ(snap.circuit_open_events, 0u);
     EXPECT_EQ(snap.circuit_close_events, 0u);
     EXPECT_EQ(snap.search_latency.sample_count, 0u);
@@ -700,5 +701,60 @@ TEST(MetricsTest, ConcurrentReadFailoverRecording)
 
     auto snap = metrics.snapshot();
     EXPECT_EQ(snap.read_failovers_total,
+              static_cast<std::uint64_t>(kThreads * kIterations));
+}
+
+// ===========================================================================
+// Load shed rejection tests (Phase 27)
+// ===========================================================================
+
+TEST(MetricsTest, LoadShedRejectionIncrements)
+{
+    MetricsCollector metrics;
+
+    EXPECT_EQ(metrics.snapshot().load_shed_rejections_total, 0u);
+
+    metrics.record_load_shed_rejection();
+    EXPECT_EQ(metrics.snapshot().load_shed_rejections_total, 1u);
+
+    metrics.record_load_shed_rejection();
+    metrics.record_load_shed_rejection();
+    EXPECT_EQ(metrics.snapshot().load_shed_rejections_total, 3u);
+}
+
+TEST(MetricsTest, LoadShedRejectionReset)
+{
+    MetricsCollector metrics;
+
+    metrics.record_load_shed_rejection();
+    metrics.record_load_shed_rejection();
+    EXPECT_EQ(metrics.snapshot().load_shed_rejections_total, 2u);
+
+    metrics.reset();
+    EXPECT_EQ(metrics.snapshot().load_shed_rejections_total, 0u);
+}
+
+TEST(MetricsTest, ConcurrentLoadShedRejectionRecording)
+{
+    MetricsCollector metrics;
+
+    constexpr int kThreads = 8;
+    constexpr int kIterations = 1000;
+
+    std::vector<std::thread> threads;
+    for (int t = 0; t < kThreads; ++t) {
+        threads.emplace_back([&metrics]() {
+            for (int i = 0; i < kIterations; ++i) {
+                metrics.record_load_shed_rejection();
+            }
+        });
+    }
+
+    for (auto& th : threads) {
+        th.join();
+    }
+
+    auto snap = metrics.snapshot();
+    EXPECT_EQ(snap.load_shed_rejections_total,
               static_cast<std::uint64_t>(kThreads * kIterations));
 }

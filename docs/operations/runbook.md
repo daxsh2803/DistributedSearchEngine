@@ -103,6 +103,7 @@ Configuration precedence: **CLI Flags > Environment Variables > Defaults**.
 | `--shards <num>` | `DSE_SHARDS` | `1` | Total logical shard count across the cluster ($S$). |
 | `--replication-factor <num>` | `DSE_REPLICATION_FACTOR` | `1` | Replication factor ($R$). Requires $1 \le R \le N$. |
 | `--data <path>` | `DSE_DATA` | `data/` | Root directory for document store and event outbox persistence. |
+| `--max-concurrent <num>` | `DSE_MAX_CONCURRENT_REQUESTS` | `64` | Maximum concurrent client HTTP requests allowed before load-shedding with HTTP 429. |
 | `--kafka-bootstrap <servers>`| `DSE_KAFKA_BOOTSTRAP` | `localhost:9094`| Kafka broker address (Kafka build only). |
 | `--kafka-group <group_id>` | `DSE_KAFKA_GROUP` | `dse-consumer-group` | Kafka consumer group identifier. |
 
@@ -298,6 +299,7 @@ GET /metrics
   "write_errors": 0,
   "retries_total": 0,
   "circuit_open_events": 0,
+  "load_shed_rejections_total": 0,
   "coordinator_searches_total": 420,
   "coordinator_writes_total": 105,
   "events_total": 105,

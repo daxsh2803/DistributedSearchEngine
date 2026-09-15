@@ -82,6 +82,9 @@ struct MetricsSnapshot {
     // Read failover metrics (Phase 24)
     std::uint64_t read_failovers_total = 0;
 
+    // Load shed metrics (Phase 27)
+    std::uint64_t load_shed_rejections_total = 0;
+
     // Circuit breaker metrics
     std::uint64_t circuit_open_events = 0;
     std::uint64_t circuit_close_events = 0;
@@ -158,6 +161,9 @@ public:
     // Record a read failover event (Phase 24: primary failed, secondary succeeded).
     void record_read_failover();
 
+    // Record a load shed rejection event (Phase 27: HttpServer concurrency limit reached).
+    void record_load_shed_rejection();
+
     // Record a circuit breaker state change.
     //   node_id     — the node whose breaker changed
     //   new_state   — the new state after transition
@@ -202,6 +208,7 @@ private:
     std::atomic<std::uint64_t> write_errors_{0};
     std::atomic<std::uint64_t> retries_total_{0};
     std::atomic<std::uint64_t> read_failovers_total_{0};
+    std::atomic<std::uint64_t> load_shed_rejections_total_{0};
     std::atomic<std::uint64_t> circuit_open_events_{0};
     std::atomic<std::uint64_t> circuit_close_events_{0};
 

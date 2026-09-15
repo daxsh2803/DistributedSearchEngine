@@ -322,6 +322,10 @@ if(BUILD_TESTING)
     target_compile_options(http_metrics_test PRIVATE ${PROJECT_WARNINGS})
     target_link_libraries(http_metrics_test PRIVATE GTest::gtest_main dse_core)
 
+    add_executable(load_management_test tests/load_management_test.cpp)
+    target_compile_options(load_management_test PRIVATE ${PROJECT_WARNINGS})
+    target_link_libraries(load_management_test PRIVATE GTest::gtest_main dse_core)
+
     gtest_discover_tests(replica_placement_test)
 
     add_executable(replication_integration_test tests/replication_integration_test.cpp)
@@ -333,6 +337,7 @@ if(BUILD_TESTING)
     gtest_discover_tests(remote_node_metrics_test)
     gtest_discover_tests(coordinator_metrics_test)
     gtest_discover_tests(http_metrics_test)
+    gtest_discover_tests(load_management_test)
 
     add_executable(message_broker_test tests/message_broker_test.cpp)
     target_compile_options(message_broker_test PRIVATE ${PROJECT_WARNINGS})

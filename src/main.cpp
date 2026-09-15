@@ -275,6 +275,28 @@ std::size_t resolve_replica_factor(int argc, char* argv[])
     return 1;
 }
 
+std::size_t resolve_max_concurrent_requests(int argc, char* argv[])
+{
+    for (int i = 1; i < argc - 1; ++i) {
+        if (std::string_view(argv[i]) == "--max-concurrent") {
+            try {
+                const int n = std::stoi(argv[i + 1]);
+                if (n > 0) return static_cast<std::size_t>(n);
+            } catch (...) {
+                std::cerr << "Invalid max concurrent requests: " << argv[i + 1] << "\n";
+                return dse::HttpServer::kDefaultMaxConcurrentRequests;
+            }
+        }
+    }
+    if (const char* env = std::getenv("DSE_MAX_CONCURRENT_REQUESTS")) {
+        try {
+            const int n = std::stoi(env);
+            if (n > 0) return static_cast<std::size_t>(n);
+        } catch (...) {}
+    }
+    return dse::HttpServer::kDefaultMaxConcurrentRequests;
+}
+
 #ifdef DSE_KAFKA_ENABLED
 std::string resolve_kafka_brokers()
 {
@@ -309,10 +331,12 @@ int main(int argc, char* argv[])
     }
     const std::string peers_spec = resolve_peers(argc, argv);
     const std::size_t replica_factor = resolve_replica_factor(argc, argv);
+    const std::size_t max_concurrent = resolve_max_concurrent_requests(argc, argv);
 
     std::cout << "Data directory: " << data_dir << "\n";
     std::cout << "Shard count: " << shard_count << "\n";
     std::cout << "Node ID: " << local_node_id << "\n";
+    std::cout << "Max concurrent requests: " << max_concurrent << "\n";
 
     // --- Create router ---
     auto router = std::make_unique<dse::ShardRouter>(shard_count);
@@ -559,7 +583,7 @@ int main(int argc, char* argv[])
     std::cout << "Event system started\n";
 
     // --- Start the HTTP server ---
-    dse::HttpServer server(*coordinator, &metrics, &eventStore, &dispatcher, &broker);
+    dse::HttpServer server(*coordinator, &metrics, &eventStore, &dispatcher, &broker, max_concurrent);
     g_server.store(&server);
 
     std::signal(SIGINT, signal_handler);

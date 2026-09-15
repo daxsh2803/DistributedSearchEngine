@@ -121,6 +121,15 @@ void MetricsCollector::record_read_failover()
 }
 
 // ---------------------------------------------------------------------------
+// Load shed metrics (Phase 27)
+// ---------------------------------------------------------------------------
+
+void MetricsCollector::record_load_shed_rejection()
+{
+    load_shed_rejections_total_.fetch_add(1, std::memory_order_relaxed);
+}
+
+// ---------------------------------------------------------------------------
 // Circuit breaker metrics
 // ---------------------------------------------------------------------------
 
@@ -218,6 +227,7 @@ MetricsSnapshot MetricsCollector::snapshot() const
     snap.write_errors = write_errors_.load(std::memory_order_relaxed);
     snap.retries_total = retries_total_.load(std::memory_order_relaxed);
     snap.read_failovers_total = read_failovers_total_.load(std::memory_order_relaxed);
+    snap.load_shed_rejections_total = load_shed_rejections_total_.load(std::memory_order_relaxed);
     snap.circuit_open_events = circuit_open_events_.load(std::memory_order_relaxed);
     snap.circuit_close_events = circuit_close_events_.load(std::memory_order_relaxed);
 
@@ -296,6 +306,7 @@ void MetricsCollector::reset()
     write_errors_.store(0, std::memory_order_relaxed);
     retries_total_.store(0, std::memory_order_relaxed);
     read_failovers_total_.store(0, std::memory_order_relaxed);
+    load_shed_rejections_total_.store(0, std::memory_order_relaxed);
     circuit_open_events_.store(0, std::memory_order_relaxed);
     circuit_close_events_.store(0, std::memory_order_relaxed);
 
