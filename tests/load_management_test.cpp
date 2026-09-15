@@ -29,6 +29,7 @@
 #include <nlohmann/json.hpp>
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdlib>
 #include <memory>
@@ -48,6 +49,8 @@ using dse::Shard;
 using dse::ShardCoordinator;
 using dse::ShardPlacement;
 using dse::ShardRouter;
+using dse::ShardSearchRequest;
+using dse::ShardSearchResponse;
 
 // Helper: build a single-node, multi-shard coordinator
 std::unique_ptr<ShardCoordinator> make_test_coordinator(std::size_t shard_count = 3)
@@ -365,6 +368,30 @@ TEST_F(LoadManagementTest, NodeServerUnchangedAndNotLoadShed)
 
 TEST_F(LoadManagementTest, HighConcurrencyStressShedding)
 {
+    // Define a node that sleeps during search to hold request slots,
+    // guaranteeing deterministic saturation for the test.
+    class SlowNode : public LocalNode {
+    public:
+        explicit SlowNode(std::size_t id) : LocalNode(id) {}
+        ShardSearchResponse search(const ShardSearchRequest& req) override {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            return LocalNode::search(req);
+        }
+    };
+
+    auto router = std::make_unique<ShardRouter>(1);
+    std::vector<std::size_t> placement = {0};
+    auto shard_placement = std::make_unique<ShardPlacement>(1, 1, placement);
+    auto slow_node = std::make_unique<SlowNode>(0);
+    slow_node->add_shard(0, std::make_unique<Shard>());
+
+    std::vector<std::unique_ptr<NodeClient>> nodes;
+    nodes.push_back(std::move(slow_node));
+
+    coordinator_ = std::make_unique<ShardCoordinator>(
+        std::move(router), std::move(shard_placement), std::move(nodes));
+    coordinator_->set_metrics(metrics_.get());
+
     // Configure small concurrency limit to trigger shedding under load
     constexpr std::size_t kLimit = 4;
     create_server(kLimit);
@@ -381,7 +408,8 @@ TEST_F(LoadManagementTest, HighConcurrencyStressShedding)
 
     for (int c = 0; c < kNumClients; ++c) {
         clients.emplace_back([this, c, &accepted, &rejected]() {
-            httplib::Client client("localhost", server_->port());
+            // Use 127.0.0.1 instead of localhost to bypass DNS/IPv6 fallback delays
+            httplib::Client client("127.0.0.1", server_->port());
             client.set_connection_timeout(5);
             client.set_read_timeout(5);
 
