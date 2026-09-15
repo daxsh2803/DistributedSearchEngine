@@ -275,6 +275,18 @@ std::size_t resolve_replica_factor(int argc, char* argv[])
     return 1;
 }
 
+#ifdef DSE_KAFKA_ENABLED
+std::string resolve_kafka_brokers()
+{
+    if (const char* env = std::getenv("DSE_KAFKA_BROKERS")) {
+        if (*env != '\0') {
+            return env;
+        }
+    }
+    return "localhost:9094";
+}
+#endif
+
 } // namespace
 
 int main(int argc, char* argv[])
@@ -421,7 +433,7 @@ int main(int argc, char* argv[])
     // Kafka path: node-specific consumer group so each node receives
     // the full event stream independently.
     dse::KafkaBrokerConfig kafkaConfig;
-    kafkaConfig.bootstrap_servers = "localhost:9094";
+    kafkaConfig.bootstrap_servers = resolve_kafka_brokers();
     kafkaConfig.client_id = "dse-producer";
     kafkaConfig.group_id = "dse-node-" + std::to_string(local_node_id);
     kafkaConfig.consumer_client_id = "dse-consumer-" + std::to_string(local_node_id);

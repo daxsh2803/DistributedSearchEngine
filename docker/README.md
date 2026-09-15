@@ -308,9 +308,128 @@ cd build && ctest -R kafka
 docker compose -f docker/docker-compose.kafka.yml down -v
 ```
 
+---
+
+## Full Replicated Cluster Deployment (Phase 26)
+
+Phase 26 provides a complete, containerized 3-node distributed search cluster with synchronous replication and asynchronous Kafka event streaming.
+
+### Prerequisites
+
+- **Docker Desktop** (Windows/macOS) or **Docker Engine** (Linux) v24.0+
+- **Docker Compose** v2.0+
+- Minimum 4 GB RAM allocated to Docker Desktop
+
+### Cluster Architecture
+
+The Compose deployment mirrors the bare-metal 3-node topology ($N=3, S=3, R=3$):
+- **dse-node-0**: Node ID 0, public HTTP on container port 8080 (mapped to `localhost:8080`), RPC port 9000.
+- **dse-node-1**: Node ID 1, public HTTP on container port 8080 (mapped to `localhost:8081`), RPC port 9001.
+- **dse-node-2**: Node ID 2, public HTTP on container port 8080 (mapped to `localhost:8082`), RPC port 9002.
+- **kafka**: Apache Kafka 4.3.1 in KRaft mode, accessible internally at `kafka:9092` and from the host at `localhost:9094`.
+- **kafka-init**: Ephemeral setup container that pre-provisions the `documents.mutations` topic with 3 partitions before search nodes start.
+
+> **Architectural Guarantee Notice:** Containerization strictly reproduces the existing system's architectural guarantees. Docker does NOT alter or strengthen the Phase 17 synchronous all-replica authority model, the Phase 24 read failover semantics, or the Phase 25 partial-availability behavior.
+
+### Network Architecture
+
+All containers reside on a dedicated Docker bridge network (`dse-network`):
+- Node RPC communication (`9000`, `9001`, `9002`) remains internal to `dse-network` and is never exposed to the host.
+- Kafka communication uses the internal listener `kafka:9092` for container-to-container messaging. Host machine access is available via `localhost:9094`.
+- Peer discovery uses Docker internal DNS names: `0=dse-node-0:9000,1=dse-node-1:9001,2=dse-node-2:9002`.
+
+### Building the Cluster Image
+
+```bash
+docker compose -f docker/docker-compose.cluster.yml build
+```
+
+This triggers the multi-stage Linux build (`debian:bookworm-slim`), compiling the engine with `-DENABLE_KAFKA=ON` and bundling runtime dependencies.
+
+### Starting the Cluster
+
+```bash
+docker compose -f docker/docker-compose.cluster.yml up -d
+```
+
+Startup sequence:
+1. `kafka` launches and runs KRaft controller initialization.
+2. `kafka` passes its internal healthcheck.
+3. `kafka-init` executes, provisions `documents.mutations` (3 partitions), and exits successfully.
+4. `dse-node-0`, `dse-node-1`, and `dse-node-2` start up, discover peers, connect to Kafka at `kafka:9092`, and expose HTTP endpoints.
+
+### Inspecting Cluster Status and Health
+
+```bash
+# Check service states and healthcheck status
+docker compose -f docker/docker-compose.cluster.yml ps
+
+# View aggregate cluster logs
+docker compose -f docker/docker-compose.cluster.yml logs
+
+# Stream logs for a specific node
+docker compose -f docker/docker-compose.cluster.yml logs -f dse-node-0
+```
+
+### Public HTTP Endpoints
+
+| Node | Endpoint URL | Health Check | Metrics |
+|:---|:---|:---|:---|
+| Node 0 | `http://localhost:8080` | `http://localhost:8080/health` | `http://localhost:8080/metrics` |
+| Node 1 | `http://localhost:8081` | `http://localhost:8081/health` | `http://localhost:8081/metrics` |
+| Node 2 | `http://localhost:8082` | `http://localhost:8082/health` | `http://localhost:8082/metrics` |
+
+Example operations from host:
+```bash
+# Health check
+curl http://localhost:8080/health
+
+# Index document via Node 0
+curl -X POST http://localhost:8080/documents \
+  -H "Content-Type: application/json" \
+  -d '{"id": 101, "content": "distributed search system containerization"}'
+
+# Search via Node 1
+curl "http://localhost:8081/search?q=containerization&mode=and"
+```
+
+### Storage Persistence and Named Volumes
+
+Data persistence is managed via dedicated named Docker volumes:
+- `dse-data-0` → `/app/data` inside `dse-node-0` (holds shard JSONL files and event store).
+- `dse-data-1` → `/app/data` inside `dse-node-1`.
+- `dse-data-2` → `/app/data` inside `dse-node-2`.
+- `kafka-data` → `/var/lib/kafka/data` inside `kafka`.
+
+Volumes are isolated per node: nodes never share storage volumes.
+
+### Stopping the Cluster
+
+```bash
+# Stop containers while preserving all persistent volume data
+docker compose -f docker/docker-compose.cluster.yml down
+```
+
+### Resetting Persistent Data (Explicit Removal)
+
+To completely wipe all persisted shard data, event outboxes, and Kafka topics/offsets:
+
+```bash
+# CAUTION: Permanently deletes named volumes dse-data-0, dse-data-1, dse-data-2, and kafka-data
+docker compose -f docker/docker-compose.cluster.yml down -v
+```
+
+---
+
 ## Configuration Files
 
+### docker-compose.cluster.yml
+
+Full multi-node replicated search cluster with 3 search engine nodes and Kafka.
+
 ### docker-compose.kafka.yml
+
+Standalone single-node Kafka infrastructure (for local non-containerized node development).
 
 Main Docker Compose configuration for Kafka infrastructure.
 

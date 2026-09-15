@@ -183,6 +183,36 @@ To run a fault-tolerant cluster on a single host, run 3 separate terminal sessio
   --data data/node2
 ```
 
+### 7.2 Docker Compose Multi-Node Deployment (Phase 26)
+
+To deploy the replicated 3-node cluster and Kafka broker in containerized mode:
+
+```bash
+# 1. Build the multi-stage Linux container image
+docker compose -f docker/docker-compose.cluster.yml build
+
+# 2. Start the cluster in detached mode
+docker compose -f docker/docker-compose.cluster.yml up -d
+
+# 3. Verify service and health status
+docker compose -f docker/docker-compose.cluster.yml ps
+
+# 4. Stream cluster logs
+docker compose -f docker/docker-compose.cluster.yml logs -f
+
+# 5. Stop the cluster (preserves named volumes)
+docker compose -f docker/docker-compose.cluster.yml down
+
+# 6. Stop and wipe all persistent storage volumes (explicit cleanup)
+docker compose -f docker/docker-compose.cluster.yml down -v
+```
+
+**Port Mapping:**
+- **Node 0:** `http://localhost:8080` (HTTP) — Internal RPC: `9000`
+- **Node 1:** `http://localhost:8081` (HTTP) — Internal RPC: `9001`
+- **Node 2:** `http://localhost:8082` (HTTP) — Internal RPC: `9002`
+- **Kafka:** `localhost:9094` (Host PLAINTEXT) — Internal: `kafka:9092`
+
 ---
 
 ## 8. HTTP API Reference

@@ -86,6 +86,21 @@ To start a 3-node cluster on localhost, launch each command in a separate termin
   --shards 3 --replication-factor 2 --data data/node2
 ```
 
+### Containerized 3-Node Cluster (Docker Compose)
+To run the complete 3-node replicated cluster with Kafka via Docker Compose:
+
+```bash
+# Build the image and start the full cluster
+docker compose -f docker/docker-compose.cluster.yml up -d --build
+
+# View cluster status (Node 0: 8080, Node 1: 8081, Node 2: 8082)
+docker compose -f docker/docker-compose.cluster.yml ps
+
+# Stop the cluster
+docker compose -f docker/docker-compose.cluster.yml down
+```
+For detailed operational and architecture documentation, see [docker/README.md](docker/README.md).
+
 ---
 
 ## 5. Public HTTP API Summary

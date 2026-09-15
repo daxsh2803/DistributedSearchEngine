@@ -1,0 +1,178 @@
+# Distributed Search Engine - 3-Node Cluster with Kafka (Phase 26)
+#
+# Complete multi-node replicated search cluster with Apache Kafka event side channel.
+#
+# Services:
+#   - kafka: Apache Kafka 4.3.1 KRaft broker + controller
+#   - kafka-init: One-shot topic provisioning for documents.mutations
+#   - dse-node-0: Search Node 0 (HTTP: localhost:8080, RPC: 9000 internal)
+#   - dse-node-1: Search Node 1 (HTTP: localhost:8081, RPC: 9001 internal)
+#   - dse-node-2: Search Node 2 (HTTP: localhost:8082, RPC: 9002 internal)
+#
+# Usage:
+#   docker compose -f docker/docker-compose.cluster.yml build
+#   docker compose -f docker/docker-compose.cluster.yml up -d
+#   docker compose -f docker/docker-compose.cluster.yml ps
+#   docker compose -f docker/docker-compose.cluster.yml logs -f
+#   docker compose -f docker/docker-compose.cluster.yml down
+
+services:
+  kafka:
+    image: apache/kafka:4.3.1
+    container_name: dse-kafka
+    hostname: kafka
+    ports:
+      - "9094:9094"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,EXTERNAL://0.0.0.0:9094
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_MIN_INSYNC_REPLICAS: 1
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_LOG_RETENTION_HOURS: 1
+      KAFKA_LOG_RETENTION_BYTES: 1073741824
+      KAFKA_HEAP_OPTS: -Xmx256m -Xms128m
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    tmpfs:
+      - /tmp
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    networks:
+      - dse-network
+
+  kafka-init:
+    image: apache/kafka:4.3.1
+    container_name: dse-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "Creating topics..."
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic documents.mutations --partitions 3 --replication-factor 1
+        echo "Verifying topics..."
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list
+        echo "Topics created successfully."
+    restart: "no"
+    networks:
+      - dse-network
+
+  dse-node-0:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: dse-node-0
+    hostname: dse-node-0
+    ports:
+      - "8080:8080"
+    environment:
+      DSE_NODE_ID: 0
+      DSE_PORT: 8080
+      DSE_RPC_PORT: 9000
+      DSE_PEERS: "0=dse-node-0:9000,1=dse-node-1:9001,2=dse-node-2:9002"
+      DSE_SHARDS: 3
+      DSE_REPLICATION_FACTOR: 3
+      DSE_DATA: /app/data/
+      DSE_KAFKA_BROKERS: "kafka:9092"
+    volumes:
+      - dse-data-0:/app/data
+    networks:
+      - dse-network
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  dse-node-1:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: dse-node-1
+    hostname: dse-node-1
+    ports:
+      - "8081:8080"
+    environment:
+      DSE_NODE_ID: 1
+      DSE_PORT: 8080
+      DSE_RPC_PORT: 9001
+      DSE_PEERS: "0=dse-node-0:9000,1=dse-node-1:9001,2=dse-node-2:9002"
+      DSE_SHARDS: 3
+      DSE_REPLICATION_FACTOR: 3
+      DSE_DATA: /app/data/
+      DSE_KAFKA_BROKERS: "kafka:9092"
+    volumes:
+      - dse-data-1:/app/data
+    networks:
+      - dse-network
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  dse-node-2:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: dse-node-2
+    hostname: dse-node-2
+    ports:
+      - "8082:8080"
+    environment:
+      DSE_NODE_ID: 2
+      DSE_PORT: 8080
+      DSE_RPC_PORT: 9002
+      DSE_PEERS: "0=dse-node-0:9000,1=dse-node-1:9001,2=dse-node-2:9002"
+      DSE_SHARDS: 3
+      DSE_REPLICATION_FACTOR: 3
+      DSE_DATA: /app/data/
+      DSE_KAFKA_BROKERS: "kafka:9092"
+    volumes:
+      - dse-data-2:/app/data
+    networks:
+      - dse-network
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+networks:
+  dse-network:
+    driver: bridge
+
+volumes:
+  kafka-data:
+  dse-data-0:
+  dse-data-1:
+  dse-data-2:
