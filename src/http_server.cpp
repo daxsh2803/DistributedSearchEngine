@@ -183,6 +183,9 @@ void HttpServer::register_routes()
         // Retry metrics
         j["retries_total"] = snap.retries_total;
 
+        // Read failover metrics (Phase 24)
+        j["read_failovers_total"] = snap.read_failovers_total;
+
         // Circuit breaker metrics
         j["circuit_open_events"] = snap.circuit_open_events;
         j["circuit_close_events"] = snap.circuit_close_events;

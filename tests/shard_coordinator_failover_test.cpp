@@ -95,6 +95,85 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+// A NodeClient wrapper that delegates to a LocalNode, but can fail search
+// after count succeeds, and tracks how many times each method was called.
+// ---------------------------------------------------------------------------
+class InspectableNode : public NodeClient {
+public:
+    InspectableNode(std::size_t id, std::unique_ptr<LocalNode> delegate)
+        : node_id_(id), delegate_(std::move(delegate)) {}
+
+    std::size_t node_id() const override { return node_id_; }
+
+    ShardSearchResponse search(const ShardSearchRequest& req) override {
+        search_calls.fetch_add(1, std::memory_order_relaxed);
+        if (fail_search_) {
+            ShardSearchResponse resp;
+            resp.shard_id = req.shard_id;
+            resp.is_error = true;
+            resp.error_message = "simulated search failure on node " + std::to_string(node_id_);
+            return resp;
+        }
+        return delegate_->search(req);
+    }
+
+    ShardWriteResponse add_document(const ShardWriteRequest& req) override {
+        return delegate_->add_document(req);
+    }
+
+    ShardWriteResponse update_document(const ShardWriteRequest& req) override {
+        return delegate_->update_document(req);
+    }
+
+    ShardRemoveResponse remove_document(const ShardRemoveRequest& req) override {
+        return delegate_->remove_document(req);
+    }
+
+    ShardGetResponse get_document(const ShardGetRequest& req) override {
+        get_calls.fetch_add(1, std::memory_order_relaxed);
+        if (fail_get_) {
+            ShardGetResponse resp;
+            resp.shard_id = req.shard_id;
+            resp.document_id = req.document_id;
+            resp.is_error = true;
+            resp.error_message = "simulated get failure on node " + std::to_string(node_id_);
+            return resp;
+        }
+        return delegate_->get_document(req);
+    }
+
+    ShardCountResponse document_count(const ShardCountRequest& req) override {
+        count_calls.fetch_add(1, std::memory_order_relaxed);
+        if (fail_count_) {
+            ShardCountResponse resp;
+            resp.shard_id = req.shard_id;
+            resp.is_error = true;
+            resp.error_message = "simulated count failure on node " + std::to_string(node_id_);
+            return resp;
+        }
+        return delegate_->document_count(req);
+    }
+
+    bool save_shard(std::size_t sid) override { return delegate_->save_shard(sid); }
+    bool load_shard(std::size_t sid) override { return delegate_->load_shard(sid); }
+
+    void set_fail_search(bool fail) { fail_search_ = fail; }
+    void set_fail_count(bool fail) { fail_count_ = fail; }
+    void set_fail_get(bool fail) { fail_get_ = fail; }
+
+    std::atomic<std::size_t> search_calls{0};
+    std::atomic<std::size_t> count_calls{0};
+    std::atomic<std::size_t> get_calls{0};
+
+private:
+    std::size_t node_id_;
+    std::unique_ptr<LocalNode> delegate_;
+    bool fail_search_ = false;
+    bool fail_count_ = false;
+    bool fail_get_ = false;
+};
+
+// ---------------------------------------------------------------------------
 // Helper: R=2 coordinator with primary healthy
 // ---------------------------------------------------------------------------
 std::unique_ptr<ShardCoordinator> make_r2_healthy()
@@ -607,6 +686,361 @@ TEST(CoordinatorFailoverTest, R2SearchFallbackNotDuplicated)
     EXPECT_FALSE(resp.is_error);
     // Must be exactly 3, not 6 (duplicated).
     EXPECT_EQ(resp.total, 3u);
+}
+
+// =========================================================================
+// Phase 24: Distributed Read Resilience & Query Failover Tests
+// =========================================================================
+
+// 1. Primary read succeeds: no failover metric, primary remains selected.
+TEST(CoordinatorFailoverTest, Phase24_PrimaryReadSucceedsNoFailoverMetric)
+{
+    auto router = std::make_unique<ShardRouter>(1);
+    std::vector<ShardReplicaSet> replica_sets = {{0, {0, 1}}};
+    auto placement = std::make_unique<ShardReplicaPlacement>(1, 2, 2, replica_sets);
+
+    auto local0 = std::make_unique<LocalNode>(0);
+    auto shard0 = std::make_unique<Shard>();
+    shard0->add_document(1, "test document");
+    local0->add_shard(0, std::move(shard0));
+
+    auto local1 = std::make_unique<LocalNode>(1);
+    auto shard1 = std::make_unique<Shard>();
+    shard1->add_document(1, "test document");
+    local1->add_shard(0, std::move(shard1));
+
+    auto n0 = std::make_unique<InspectableNode>(0, std::move(local0));
+    auto n1 = std::make_unique<InspectableNode>(1, std::move(local1));
+
+    auto* p0 = n0.get();
+    auto* p1 = n1.get();
+
+    std::vector<std::unique_ptr<NodeClient>> nodes;
+    nodes.push_back(std::move(n0));
+    nodes.push_back(std::move(n1));
+    auto coord = std::make_unique<ShardCoordinator>(
+        std::move(router), std::move(placement), std::move(nodes));
+
+    MetricsCollector metrics;
+    coord->set_metrics(&metrics);
+
+    SearchRequest req;
+    req.query = "test";
+    req.mode = SearchMode::Or;
+    req.limit = 10;
+    const auto resp = coord->search(req);
+
+    EXPECT_FALSE(resp.is_error);
+    EXPECT_TRUE(resp.complete);
+    EXPECT_EQ(resp.total, 1u);
+
+    // Primary was selected and served both count and search.
+    EXPECT_EQ(p0->count_calls.load(), 1u);
+    EXPECT_EQ(p0->search_calls.load(), 1u);
+    // Secondary was never touched.
+    EXPECT_EQ(p1->count_calls.load(), 0u);
+    EXPECT_EQ(p1->search_calls.load(), 0u);
+
+    // No read failovers recorded.
+    const auto snap = metrics.snapshot();
+    EXPECT_EQ(snap.read_failovers_total, 0u);
+}
+
+// 2. Primary read fails and secondary succeeds:
+//    - search succeeds
+//    - failover metric increments exactly once for that shard selection
+//    - secondary is pinned
+TEST(CoordinatorFailoverTest, Phase24_PrimaryFailsSecondarySucceedsFailoverMetricIncrementsOnce)
+{
+    auto router = std::make_unique<ShardRouter>(1);
+    std::vector<ShardReplicaSet> replica_sets = {{0, {0, 1}}};
+    auto placement = std::make_unique<ShardReplicaPlacement>(1, 2, 2, replica_sets);
+
+    auto n0 = std::make_unique<FailingNode>(0);
+
+    auto local1 = std::make_unique<LocalNode>(1);
+    auto shard1 = std::make_unique<Shard>();
+    shard1->add_document(1, "resilient content");
+    local1->add_shard(0, std::move(shard1));
+    auto n1 = std::make_unique<InspectableNode>(1, std::move(local1));
+    auto* p1 = n1.get();
+
+    std::vector<std::unique_ptr<NodeClient>> nodes;
+    nodes.push_back(std::move(n0));
+    nodes.push_back(std::move(n1));
+    auto coord = std::make_unique<ShardCoordinator>(
+        std::move(router), std::move(placement), std::move(nodes));
+
+    MetricsCollector metrics;
+    coord->set_metrics(&metrics);
+
+    SearchRequest req;
+    req.query = "resilient";
+    req.mode = SearchMode::Or;
+    req.limit = 10;
+    const auto resp = coord->search(req);
+
+    EXPECT_FALSE(resp.is_error);
+    EXPECT_TRUE(resp.complete);
+    EXPECT_EQ(resp.total, 1u);
+
+    // Secondary was pinned: served count and search.
+    EXPECT_EQ(p1->count_calls.load(), 1u);
+    EXPECT_EQ(p1->search_calls.load(), 1u);
+
+    // Failover metric incremented exactly once for this shard selection.
+    const auto snap = metrics.snapshot();
+    EXPECT_EQ(snap.read_failovers_total, 1u);
+}
+
+// 3. Replica pinning across multiple terms:
+//    - compute_global_n selects secondary
+//    - all terms in collect_postings use that same secondary
+//    - failover metric increments exactly once despite multiple terms
+//    - tertiary replica is not touched
+TEST(CoordinatorFailoverTest, Phase24_ReplicaPinningMultiTermNoIndependentSelection)
+{
+    auto router = std::make_unique<ShardRouter>(1);
+    std::vector<ShardReplicaSet> replica_sets = {{0, {0, 1, 2}}};
+    auto placement = std::make_unique<ShardReplicaPlacement>(1, 3, 3, replica_sets);
+
+    auto n0 = std::make_unique<FailingNode>(0);
+
+    auto local1 = std::make_unique<LocalNode>(1);
+    auto shard1 = std::make_unique<Shard>();
+    shard1->add_document(1, "alpha beta gamma");
+    local1->add_shard(0, std::move(shard1));
+    auto n1 = std::make_unique<InspectableNode>(1, std::move(local1));
+    auto* p1 = n1.get();
+
+    auto local2 = std::make_unique<LocalNode>(2);
+    auto shard2 = std::make_unique<Shard>();
+    shard2->add_document(1, "alpha beta gamma");
+    local2->add_shard(0, std::move(shard2));
+    auto n2 = std::make_unique<InspectableNode>(2, std::move(local2));
+    auto* p2 = n2.get();
+
+    std::vector<std::unique_ptr<NodeClient>> nodes;
+    nodes.push_back(std::move(n0));
+    nodes.push_back(std::move(n1));
+    nodes.push_back(std::move(n2));
+    auto coord = std::make_unique<ShardCoordinator>(
+        std::move(router), std::move(placement), std::move(nodes));
+
+    MetricsCollector metrics;
+    coord->set_metrics(&metrics);
+
+    SearchRequest req;
+    req.query = "alpha beta gamma";
+    req.mode = SearchMode::And;
+    req.limit = 10;
+    const auto resp = coord->search(req);
+
+    EXPECT_FALSE(resp.is_error);
+    EXPECT_TRUE(resp.complete);
+    EXPECT_EQ(resp.total, 1u);
+
+    // Secondary pinned: 1 count call, 3 search calls (1 per term).
+    EXPECT_EQ(p1->count_calls.load(), 1u);
+    EXPECT_EQ(p1->search_calls.load(), 3u);
+
+    // Tertiary was never selected or touched during postings.
+    EXPECT_EQ(p2->count_calls.load(), 0u);
+    EXPECT_EQ(p2->search_calls.load(), 0u);
+
+    // Exactly 1 failover recorded for the shard selection.
+    const auto snap = metrics.snapshot();
+    EXPECT_EQ(snap.read_failovers_total, 1u);
+}
+
+// 4. Pinned replica fails after Global N:
+//    - shard becomes incomplete
+//    - existing error reporting is preserved
+//    - NO mid-query failover to another replica occurs
+TEST(CoordinatorFailoverTest, Phase24_PinnedReplicaFailsAfterGlobalNMarkedIncomplete)
+{
+    auto router = std::make_unique<ShardRouter>(1);
+    std::vector<ShardReplicaSet> replica_sets = {{0, {0, 1}}};
+    auto placement = std::make_unique<ShardReplicaPlacement>(1, 2, 2, replica_sets);
+
+    // Primary node succeeds on count, but will fail on search.
+    auto local0 = std::make_unique<LocalNode>(0);
+    auto shard0 = std::make_unique<Shard>();
+    shard0->add_document(1, "data on both");
+    local0->add_shard(0, std::move(shard0));
+    auto n0 = std::make_unique<InspectableNode>(0, std::move(local0));
+    n0->set_fail_search(true);  // Fails during postings!
+    auto* p0 = n0.get();
+
+    // Secondary node is healthy with data.
+    auto local1 = std::make_unique<LocalNode>(1);
+    auto shard1 = std::make_unique<Shard>();
+    shard1->add_document(1, "data on both");
+    local1->add_shard(0, std::move(shard1));
+    auto n1 = std::make_unique<InspectableNode>(1, std::move(local1));
+    auto* p1 = n1.get();
+
+    std::vector<std::unique_ptr<NodeClient>> nodes;
+    nodes.push_back(std::move(n0));
+    nodes.push_back(std::move(n1));
+    auto coord = std::make_unique<ShardCoordinator>(
+        std::move(router), std::move(placement), std::move(nodes));
+
+    MetricsCollector metrics;
+    coord->set_metrics(&metrics);
+
+    SearchRequest req;
+    req.query = "data";
+    req.mode = SearchMode::Or;
+    req.limit = 10;
+    const auto resp = coord->search(req);
+
+    // Search request itself succeeds but result is incomplete.
+    EXPECT_FALSE(resp.is_error);
+    EXPECT_FALSE(resp.complete);
+    EXPECT_FALSE(resp.errors.empty());
+
+    // Primary was pinned: received count and search.
+    EXPECT_EQ(p0->count_calls.load(), 1u);
+    EXPECT_EQ(p0->search_calls.load(), 1u);
+
+    // CRITICAL: secondary was NOT queried during postings (no mid-query failover!).
+    EXPECT_EQ(p1->search_calls.load(), 0u);
+}
+
+// 5. Multi-shard search:
+//    - pinning is independent per shard
+//    - one shard uses primary while another uses secondary
+TEST(CoordinatorFailoverTest, Phase24_MultiShardIndependentPinning)
+{
+    // 2 shards, R=2.
+    // Shard 0: primary(0) healthy, secondary(1) healthy.
+    // Shard 1: primary(2) failing, secondary(3) healthy.
+    auto router = std::make_unique<ShardRouter>(2);
+    std::vector<ShardReplicaSet> replica_sets = {
+        {0, {0, 1}},
+        {1, {2, 3}},
+    };
+    auto placement = std::make_unique<ShardReplicaPlacement>(2, 4, 2, replica_sets);
+
+    // Shard 0 nodes
+    auto local0 = std::make_unique<LocalNode>(0);
+    auto s0_0 = std::make_unique<Shard>();
+    s0_0->add_document(0, "multi shard match");
+    local0->add_shard(0, std::move(s0_0));
+    local0->add_shard(1, std::make_unique<Shard>());
+    auto n0 = std::make_unique<InspectableNode>(0, std::move(local0));
+    auto* p0 = n0.get();
+
+    auto local1 = std::make_unique<LocalNode>(1);
+    local1->add_shard(0, std::make_unique<Shard>());
+    local1->add_shard(1, std::make_unique<Shard>());
+    auto n1 = std::make_unique<InspectableNode>(1, std::move(local1));
+    auto* p1 = n1.get();
+
+    // Shard 1 nodes (primary 2 fails, secondary 3 succeeds)
+    auto n2 = std::make_unique<FailingNode>(2);
+
+    auto local3 = std::make_unique<LocalNode>(3);
+    local3->add_shard(0, std::make_unique<Shard>());
+    auto s3_1 = std::make_unique<Shard>();
+    s3_1->add_document(1, "multi shard match");
+    local3->add_shard(1, std::move(s3_1));
+    auto n3 = std::make_unique<InspectableNode>(3, std::move(local3));
+    auto* p3 = n3.get();
+
+    std::vector<std::unique_ptr<NodeClient>> nodes;
+    nodes.push_back(std::move(n0));
+    nodes.push_back(std::move(n1));
+    nodes.push_back(std::move(n2));
+    nodes.push_back(std::move(n3));
+    auto coord = std::make_unique<ShardCoordinator>(
+        std::move(router), std::move(placement), std::move(nodes));
+
+    MetricsCollector metrics;
+    coord->set_metrics(&metrics);
+
+    SearchRequest req;
+    req.query = "match";
+    req.mode = SearchMode::Or;
+    req.limit = 10;
+    const auto resp = coord->search(req);
+
+    EXPECT_FALSE(resp.is_error);
+    EXPECT_TRUE(resp.complete);
+    EXPECT_EQ(resp.total, 2u);
+
+    // Shard 0 used primary (Node 0). Secondary (Node 1) was not queried.
+    EXPECT_EQ(p0->search_calls.load(), 1u);
+    EXPECT_EQ(p1->search_calls.load(), 0u);
+
+    // Shard 1 used secondary (Node 3).
+    EXPECT_EQ(p3->search_calls.load(), 1u);
+
+    // Exactly 1 failover recorded across the whole search (from shard 1).
+    const auto snap = metrics.snapshot();
+    EXPECT_EQ(snap.read_failovers_total, 1u);
+}
+
+// 6. get_document: primary failure -> secondary success increments failover metric
+TEST(CoordinatorFailoverTest, Phase24_GetDocumentFailoverMetric)
+{
+    auto router = std::make_unique<ShardRouter>(1);
+    std::vector<ShardReplicaSet> replica_sets = {{0, {0, 1}}};
+    auto placement = std::make_unique<ShardReplicaPlacement>(1, 2, 2, replica_sets);
+
+    auto n0 = std::make_unique<FailingNode>(0);
+
+    auto local1 = std::make_unique<LocalNode>(1);
+    auto shard1 = std::make_unique<Shard>();
+    shard1->add_document(42, "failover document");
+    local1->add_shard(0, std::move(shard1));
+    auto n1 = std::make_unique<InspectableNode>(1, std::move(local1));
+
+    std::vector<std::unique_ptr<NodeClient>> nodes;
+    nodes.push_back(std::move(n0));
+    nodes.push_back(std::move(n1));
+    auto coord = std::make_unique<ShardCoordinator>(
+        std::move(router), std::move(placement), std::move(nodes));
+
+    MetricsCollector metrics;
+    coord->set_metrics(&metrics);
+
+    // Failover to secondary where document exists.
+    const auto doc = coord->get_document(42);
+    ASSERT_TRUE(doc.has_value());
+    EXPECT_EQ(doc->content, "failover document");
+
+    auto snap = metrics.snapshot();
+    EXPECT_EQ(snap.read_failovers_total, 1u);
+
+    // Failover to secondary where document does NOT exist (not found).
+    const auto missing = coord->get_document(999);
+    EXPECT_FALSE(missing.has_value());
+
+    snap = metrics.snapshot();
+    EXPECT_EQ(snap.read_failovers_total, 2u);
+}
+
+// 7. All replicas fail: failover metric does NOT increment (no replica served successfully).
+TEST(CoordinatorFailoverTest, Phase24_AllReplicasFailNoFailoverMetric)
+{
+    auto coord = make_r2_all_failing();
+
+    MetricsCollector metrics;
+    coord->set_metrics(&metrics);
+
+    SearchRequest req;
+    req.query = "hello";
+    req.mode = SearchMode::Or;
+    req.limit = 10;
+    const auto resp = coord->search(req);
+
+    EXPECT_FALSE(resp.is_error);
+    EXPECT_FALSE(resp.complete);
+
+    const auto snap = metrics.snapshot();
+    EXPECT_EQ(snap.read_failovers_total, 0u);
 }
 
 } // namespace

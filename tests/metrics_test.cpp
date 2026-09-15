@@ -47,6 +47,7 @@ TEST(MetricsTest, InitialSnapshotIsZero)
     EXPECT_EQ(snap.writes_total, 0u);
     EXPECT_EQ(snap.write_errors, 0u);
     EXPECT_EQ(snap.retries_total, 0u);
+    EXPECT_EQ(snap.read_failovers_total, 0u);
     EXPECT_EQ(snap.circuit_open_events, 0u);
     EXPECT_EQ(snap.circuit_close_events, 0u);
     EXPECT_EQ(snap.search_latency.sample_count, 0u);
@@ -645,4 +646,59 @@ TEST(MetricsTest, DefaultBufferSizeIs1000)
 
     auto snap2 = metrics.snapshot();
     EXPECT_EQ(snap2.search_latency.sample_count, 1000u);
+}
+
+// ===========================================================================
+// 17. Read failover metrics (Phase 24)
+// ===========================================================================
+
+TEST(MetricsTest, ReadFailoverIncrements)
+{
+    MetricsCollector metrics;
+
+    EXPECT_EQ(metrics.snapshot().read_failovers_total, 0u);
+
+    metrics.record_read_failover();
+    EXPECT_EQ(metrics.snapshot().read_failovers_total, 1u);
+
+    metrics.record_read_failover();
+    metrics.record_read_failover();
+    EXPECT_EQ(metrics.snapshot().read_failovers_total, 3u);
+}
+
+TEST(MetricsTest, ReadFailoverReset)
+{
+    MetricsCollector metrics;
+
+    metrics.record_read_failover();
+    metrics.record_read_failover();
+    EXPECT_EQ(metrics.snapshot().read_failovers_total, 2u);
+
+    metrics.reset();
+    EXPECT_EQ(metrics.snapshot().read_failovers_total, 0u);
+}
+
+TEST(MetricsTest, ConcurrentReadFailoverRecording)
+{
+    MetricsCollector metrics;
+
+    constexpr int kThreads = 8;
+    constexpr int kIterations = 1000;
+
+    std::vector<std::thread> threads;
+    for (int t = 0; t < kThreads; ++t) {
+        threads.emplace_back([&metrics]() {
+            for (int i = 0; i < kIterations; ++i) {
+                metrics.record_read_failover();
+            }
+        });
+    }
+
+    for (auto& th : threads) {
+        th.join();
+    }
+
+    auto snap = metrics.snapshot();
+    EXPECT_EQ(snap.read_failovers_total,
+              static_cast<std::uint64_t>(kThreads * kIterations));
 }

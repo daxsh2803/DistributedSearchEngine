@@ -93,36 +93,33 @@ const std::vector<std::size_t>& ShardCoordinator::replicas_for_shard(
 }
 
 ShardCoordinator::PostingsResult ShardCoordinator::collect_postings(
-    std::string_view term) const
+    std::string_view term,
+    const std::vector<std::optional<std::size_t>>& pinned_nodes) const
 {
     const std::size_t n = router_->shard_count();
 
-    // Parallel fan-out: search all shards concurrently.
+    // Parallel fan-out: search all shards concurrently using pinned replicas.
     std::vector<std::future<ShardSearchResponse>> futures;
     futures.reserve(n);
 
     for (std::size_t sid = 0; sid < n; ++sid) {
+        std::optional<std::size_t> pinned_node =
+            (sid < pinned_nodes.size()) ? pinned_nodes[sid] : std::nullopt;
+
         futures.push_back(std::async(std::launch::async,
-            [this, sid, term]() {
-                // Try replicas in order: primary first, then fallbacks.
-                const auto& replicas = replicas_for_shard(sid);
-                for (std::size_t node_id : replicas) {
-                    NodeClient& nc = *nodes_[node_id];
-                    ShardSearchRequest req;
-                    req.shard_id = sid;
-                    req.terms = {std::string(term)};
-                    auto resp = nc.search(req);
-                    if (!resp.is_error) {
-                        return resp;  // Success — use this replica.
-                    }
-                    // Primary/replica failed — try next.
+            [this, sid, term, pinned_node]() {
+                if (!pinned_node.has_value()) {
+                    ShardSearchResponse fail_resp;
+                    fail_resp.shard_id = sid;
+                    fail_resp.is_error = true;
+                    fail_resp.error_message = "all replicas failed for shard " + std::to_string(sid);
+                    return fail_resp;
                 }
-                // All replicas failed — return error.
-                ShardSearchResponse fail_resp;
-                fail_resp.shard_id = sid;
-                fail_resp.is_error = true;
-                fail_resp.error_message = "all replicas failed for shard " + std::to_string(sid);
-                return fail_resp;
+                NodeClient& nc = *nodes_[*pinned_node];
+                ShardSearchRequest req;
+                req.shard_id = sid;
+                req.terms = {std::string(term)};
+                return nc.search(req);
             }));
     }
 
@@ -153,10 +150,15 @@ ShardCoordinator::PostingsResult ShardCoordinator::collect_postings(
 ShardCoordinator::GlobalNResult ShardCoordinator::compute_global_n() const
 {
     GlobalNResult result;
-    for (std::size_t sid = 0; sid < router_->shard_count(); ++sid) {
+    const std::size_t n = router_->shard_count();
+    result.pinned_nodes.resize(n, std::nullopt);
+
+    for (std::size_t sid = 0; sid < n; ++sid) {
         // Try replicas in order for document count.
         bool shard_ok = false;
         const auto& replicas = replicas_for_shard(sid);
+        const std::size_t primary_node = placement_->primary_of(sid);
+
         for (std::size_t node_id : replicas) {
             NodeClient& nc = *nodes_[node_id];
             ShardCountRequest req;
@@ -164,7 +166,11 @@ ShardCoordinator::GlobalNResult ShardCoordinator::compute_global_n() const
             auto resp = nc.document_count(req);
             if (!resp.is_error) {
                 result.total += resp.document_count;
+                result.pinned_nodes[sid] = node_id;
                 shard_ok = true;
+                if (node_id != primary_node && metrics_) {
+                    metrics_->record_read_failover();
+                }
                 break;
             }
         }
@@ -252,7 +258,7 @@ SearchResponse ShardCoordinator::search(const SearchRequest& request) const
         term_infos.reserve(terms.size());
 
         for (const auto& term : terms) {
-            auto pr = collect_postings(term);
+            auto pr = collect_postings(term, gn.pinned_nodes);
 
             // Merge per-term failures into response.
             for (auto& f : pr.failures) {
@@ -349,7 +355,7 @@ SearchResponse ShardCoordinator::search(const SearchRequest& request) const
         std::unordered_map<doc_id, double> scores;
 
         for (const auto& term : terms) {
-            auto pr = collect_postings(term);
+            auto pr = collect_postings(term, gn.pinned_nodes);
 
             // Merge per-term failures into response.
             for (auto& f : pr.failures) {
@@ -688,6 +694,7 @@ CoordinatorDeleteResponse ShardCoordinator::remove(doc_id id)
 std::optional<Document> ShardCoordinator::get_document(doc_id id) const
 {
     const std::size_t shard_id = router_->route(id);
+    const std::size_t primary_node = placement_->primary_of(shard_id);
 
     // Try replicas in order: primary first, then fallbacks.
     const auto& replicas = replicas_for_shard(shard_id);
@@ -702,6 +709,10 @@ std::optional<Document> ShardCoordinator::get_document(doc_id id) const
         if (resp.is_error) {
             // Actual failure — try next replica.
             continue;
+        }
+
+        if (node_id != primary_node && metrics_) {
+            metrics_->record_read_failover();
         }
 
         // Successful operation — return the result (found or not-found).

@@ -79,6 +79,9 @@ struct MetricsSnapshot {
     // Retry metrics
     std::uint64_t retries_total = 0;
 
+    // Read failover metrics (Phase 24)
+    std::uint64_t read_failovers_total = 0;
+
     // Circuit breaker metrics
     std::uint64_t circuit_open_events = 0;
     std::uint64_t circuit_close_events = 0;
@@ -152,6 +155,9 @@ public:
     void record_retry(std::size_t node_id,
                       const std::string& operation);
 
+    // Record a read failover event (Phase 24: primary failed, secondary succeeded).
+    void record_read_failover();
+
     // Record a circuit breaker state change.
     //   node_id     — the node whose breaker changed
     //   new_state   — the new state after transition
@@ -195,6 +201,7 @@ private:
     std::atomic<std::uint64_t> writes_total_{0};
     std::atomic<std::uint64_t> write_errors_{0};
     std::atomic<std::uint64_t> retries_total_{0};
+    std::atomic<std::uint64_t> read_failovers_total_{0};
     std::atomic<std::uint64_t> circuit_open_events_{0};
     std::atomic<std::uint64_t> circuit_close_events_{0};
 

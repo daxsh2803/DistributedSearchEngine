@@ -142,17 +142,21 @@ private:
     const std::vector<std::size_t>& replicas_for_shard(std::size_t shard_id) const;
 
     // Collect postings for a term across all shards, recording failures.
+    // Uses query-locally pinned replicas per shard (Phase 24).
     struct PostingsResult {
         std::vector<Posting> postings;
         std::vector<NodeFailureInfo> failures;
     };
-    PostingsResult collect_postings(std::string_view term) const;
+    PostingsResult collect_postings(
+        std::string_view term,
+        const std::vector<std::optional<std::size_t>>& pinned_nodes) const;
 
-    // Compute global document count, recording failures.
+    // Compute global document count, recording failures and pinned replicas (Phase 24).
     struct GlobalNResult {
         std::size_t total = 0;
         bool complete = true;
         std::vector<NodeFailureInfo> failures;
+        std::vector<std::optional<std::size_t>> pinned_nodes;
     };
     GlobalNResult compute_global_n() const;
 

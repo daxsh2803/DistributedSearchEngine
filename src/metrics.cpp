@@ -112,6 +112,15 @@ void MetricsCollector::record_retry(std::size_t node_id,
 }
 
 // ---------------------------------------------------------------------------
+// Read failover metrics (Phase 24)
+// ---------------------------------------------------------------------------
+
+void MetricsCollector::record_read_failover()
+{
+    read_failovers_total_.fetch_add(1, std::memory_order_relaxed);
+}
+
+// ---------------------------------------------------------------------------
 // Circuit breaker metrics
 // ---------------------------------------------------------------------------
 
@@ -208,6 +217,7 @@ MetricsSnapshot MetricsCollector::snapshot() const
     snap.writes_total = writes_total_.load(std::memory_order_relaxed);
     snap.write_errors = write_errors_.load(std::memory_order_relaxed);
     snap.retries_total = retries_total_.load(std::memory_order_relaxed);
+    snap.read_failovers_total = read_failovers_total_.load(std::memory_order_relaxed);
     snap.circuit_open_events = circuit_open_events_.load(std::memory_order_relaxed);
     snap.circuit_close_events = circuit_close_events_.load(std::memory_order_relaxed);
 
@@ -285,6 +295,7 @@ void MetricsCollector::reset()
     writes_total_.store(0, std::memory_order_relaxed);
     write_errors_.store(0, std::memory_order_relaxed);
     retries_total_.store(0, std::memory_order_relaxed);
+    read_failovers_total_.store(0, std::memory_order_relaxed);
     circuit_open_events_.store(0, std::memory_order_relaxed);
     circuit_close_events_.store(0, std::memory_order_relaxed);
 
