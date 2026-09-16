@@ -28,8 +28,10 @@ The Distributed Search Engine is a high-performance information retrieval system
   - **Phases 16–17:** Metrics Foundation, **Synchronous All-Replica Replication / Cluster Authority Model**.
   - **Phases 18–19:** **Durable Outbox Event Pipeline** (`EventStore`, `EventDispatcher`), Native Apache Kafka Integration (`KafkaClient`, `KafkaConsumer`, `KafkaMessageBroker`, `RemoteEventProcessor`).
   - **Phases 20–22:** Multi-Node Resilience Verification, Automated Benchmarking Suite (Benchmarks A–J), **Unified Operational Observability**.
+  - **Phases 24–26:** Distributed Read Resilience & Query Failover, Partial-Availability Search Semantics, Dockerized 3-Node Replicated Cluster.
+  - **Phases 27–29:** Concurrency Limits & Edge Shedding, Failure Testing & Fault Injection Scenarios (A–G), **Integrated System Validation & Regression Suite**.
 - **Current Phase:**
-  - **Phase 23:** Comprehensive Documentation & Operational Blueprint.
+  - **Phase 30:** Comprehensive System Documentation, Operational Runbook, and Architecture Blueprint (Absolute finish line).
 
 ---
 
@@ -46,7 +48,7 @@ The Distributed Search Engine is a high-performance information retrieval system
 cmake -B build -S .
 cmake --build build --config Debug
 
-# Run the 1051-test suite
+# Run the 1085-test suite
 ctest --test-dir build -C Debug --output-on-failure
 ```
 
