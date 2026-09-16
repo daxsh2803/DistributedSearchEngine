@@ -375,6 +375,11 @@ if(BUILD_TESTING)
     target_link_libraries(remote_event_processor_test PRIVATE GTest::gtest_main dse_core)
     gtest_discover_tests(remote_event_processor_test)
 
+    add_executable(fault_injection_integration_test tests/fault_injection_integration_test.cpp)
+    target_compile_options(fault_injection_integration_test PRIVATE ${PROJECT_WARNINGS})
+    target_link_libraries(fault_injection_integration_test PRIVATE GTest::gtest_main dse_core)
+    gtest_discover_tests(fault_injection_integration_test)
+
     if(ENABLE_KAFKA)
         add_executable(kafka_client_test tests/kafka_client_test.cpp)
         target_compile_options(kafka_client_test PRIVATE ${PROJECT_WARNINGS})
