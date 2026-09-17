@@ -1,305 +1,143 @@
-# Project Status
-
-## Current Phase
-
-Phase 8 — Concurrency and Thread Safety: **COMPLETE**
-
-- Phase 8A-1 — DocumentStore Thread Safety: **COMPLETE**
-- Phase 8A-2 — InvertedIndex Thread Safety: **COMPLETE**
-- Phase 8A-3 — HTTP Concurrency Verification: **COMPLETE**
-- Phase 8B — Service-Level Coordination: **COMPLETE**
-
-### Phase 8A Verification Results (actual, UCRT64 toolchain)
-
-- Build: **successful, zero warnings** (`-Wall -Wextra -Wpedantic`)
-- Tests: **368/368 passed (100%)**
-  - 9 HTTP concurrency tests + 10 InvertedIndex concurrency tests + 10 DocumentStore concurrency tests + 6 ingestion concurrency tests + 333 pre-existing tests
-- Repeated HTTP concurrency: **27/27 passed** (3 runs x 9 tests)
-- ConcurrentDuplicateAdds: **100/100 passed** (50+50 runs)
-- TSAN: **unavailable** (libtsan missing from MSYS2 UCRT64)
-- Application: handles concurrent requests safely, clean shutdown under load
-
-## Completed: Phase 6
-
-Phase 6 — Document Ingestion: **COMPLETE**
-
-- Phase 6B-1 — DocumentStore: **COMPLETE**
-- Phase 6B-2 — IngestionService + POST /documents: **COMPLETE**
-
-## Completed: Phase 1
-
-Phase 1 — Text Processing and Tokenization: **COMPLETE**
-
-- Phase 1A — Design and Learning: **COMPLETE**
-- Phase 1B-1 — Core Library Structure: **COMPLETE**
-- Phase 1B-2 — Tokenizer Implementation and Tests: **COMPLETE**
-
-## Completed: Phase 3
-
-Phase 3 — Query Processing: **COMPLETE**
-
-- Phase 3A — Design and Learning: **COMPLETE**
-- Phase 3B — Implementation: **COMPLETE**
-
-### Phase 3B Verification Results (actual, UCRT64 toolchain)
-
-- Build: **successful, zero warnings**
-- Tests: **158/158 passed (100%)**
-  - 60 query-processor tests + 52 inverted-index tests + 45 tokenizer tests + 2 smoke tests
-- Application: exit code 0
-
-## Completed: Phase 2
-
-Phase 2 — Inverted Index: **COMPLETE**
-
-- Phase 2A — Design and Learning: **COMPLETE**
-- Phase 2B — Implementation: **COMPLETE**
-
-## Completed
-
-- [x] Development environment configured
-- [x] GCC 16.2 configured (MSYS2 UCRT64, `C:\msys64\ucrt64\bin\g++.exe`)
-- [x] C++20 support verified
-- [x] CMake 4.4.2 installed (MSYS2 UCRT64)
-- [x] Ninja 1.13.2 installed (MSYS2 UCRT64)
-- [x] Git installed
-- [x] GitHub repository created
-- [x] Local Git repository initialized
-- [x] GitHub remote configured
-- [x] Project directory structure created
-- [x] CMake project created
-- [x] GoogleTest configured
-- [x] Initial test passing
-- [x] Initial commit created (commit `ea895c4`, verified locally)
-- [x] Initial push completed (per user confirmation)
-- [x] Phase 1A — tokenizer design specification and learning documentation
-      (`docs/learning/phase-1-tokenizer.md`, `docs/decisions/ADR-001-tokenizer-design.md`)
-- [x] Phase 1B-1 — core library structure (`dse_core` static library, tokenizer
-      header/source, `tokenizer_test` target, CMake wiring)
-- [x] Phase 1B-2 — tokenizer implementation and tests (`dse::tokenize` per
-      ADR-001; 45 tests across the eight Phase 1A test groups)
-- [x] Phase 2A — inverted index design specification and learning
-      documentation (`docs/learning/phase-2-inverted-index.md`,
-      `docs/decisions/ADR-002-inverted-index-design.md`)
-- [x] Phase 2B — inverted index implementation and tests
-      (`dse::InvertedIndex` per ADR-002; full suite 99/99 passing:
-      52 index tests + 3 integration tests + 45 tokenizer + 2 smoke)
-- [x] Phase 3A — query processing design specification and learning
-      documentation (`docs/learning/phase-3-query-processing.md`,
-      `docs/decisions/ADR-003-query-processing-design.md`)
-
-## Verification Results (Phase 0)
-
-All results below were actually obtained on this machine on 2026-08-16 using
-this project's verified toolchain: MSYS2 UCRT64 with GCC 16.2.0, CMake 4.4.2,
-Ninja 1.13.2, and C++20. The CodeBlocks MinGW GCC 8.1 installation that sits
-on the default PATH must **not** be used — it cannot compile C++20. Always run
-CMake with the UCRT64 `bin` directory first on PATH:
-
-```bash
-export PATH="/c/msys64/ucrt64/bin:$PATH"
-```
-
-### Build
-
-```
-cmake -S . -B build -G Ninja \
-  -DCMAKE_CXX_COMPILER=/c/msys64/ucrt64/bin/g++.exe \
-  -DCMAKE_MAKE_PROGRAM=/c/msys64/ucrt64/bin/ninja.exe
-cmake --build build
-```
-
-Result: success (8/8 Ninja steps). Built `DistributedSearchEngine.exe`,
-`smoke_test.exe`, and the GoogleTest static libraries (`libgtest.a`,
-`libgtest_main.a`). GoogleTest `v1.18.0` was fetched at configure time via
-FetchContent (not vendored into the repository).
-
-### Tests
-
-```
-ctest --test-dir build --output-on-failure
-```
-
-Result: **2/2 tests passed (100%)** — `SmokeTest.AddOneIncrementsValue` and
-`SmokeTest.Cpp20FeatureAvailable`; total test time ~0.2 s. GoogleTest is
-integrated and CTest discovers and executes the tests.
-
-### Application
-
-```
-./build/DistributedSearchEngine.exe
-```
-
-Result: prints `DistributedSearchEngine | Phase 0 - Project Foundation` and
-`Built with C++ standard: 202002`; exit code 0.
-
-## Phase 1A (Design & Learning) — Completed
-
-- [x] Search-engine context and tokenizer responsibility documented
-- [x] API contract proposed (`std::string_view` input, owning `std::vector<std::string>` output)
-- [x] Deterministic ASCII tokenization rules defined (maximal runs of `[A-Za-z0-9]`,
-      lowercased; everything else a separator)
-- [x] Unicode scope documented as a known limitation (ASCII-only for Phase 1)
-- [x] Testing strategy designed (groups defined; no test files created yet)
-- [x] Learning material: `docs/learning/phase-1-tokenizer.md`
-- [x] Architecture decision record: `docs/decisions/ADR-001-tokenizer-design.md`
-
-## Phase 1B (Implementation) — Completed
-
-- [x] Phase 1B-1 — `dse_core` static library created; `DistributedSearchEngine`
-      and `tokenizer_test` link against it; include directories configured
-      (PUBLIC) so `#include "tokenizer.h"` works for all consumers
-- [x] Phase 1B-2 — `dse::tokenize` implemented exactly per ADR-001: single-pass
-      O(N), explicit ASCII range checks (`is_token_char`, `to_ascii_lower`),
-      no third-party code
-- [x] `tokenizer_test.cpp` covers the eight Phase 1A test groups
-      (basic, normalization, punctuation, whitespace, hyphen, duplicates,
-      numbers/symbols, edge cases)
-
-### Phase 1B Verification Results (actual, 2026-08-16, UCRT64 toolchain)
-
-- Build: **successful, zero warnings** (`-Wall -Wextra -Wpedantic`)
-- Tests: **47/47 passed (100%)** — 45 tokenizer tests + 2 Phase 0 smoke tests
-- Total test time: ~1.25 s (functional check; **no performance benchmark was
-  performed**)
-- Application: `DistributedSearchEngine.exe` ran with exit code 0,
-  `__cplusplus == 202002` (C++20)
-
-Full details: `docs/learning/phase-1-tokenizer.md`, section
-"Implementation Results — Phase 1B".
-
-## Phase 2A (Design & Learning) — Completed
-
-- [x] Inverted-index fundamentals and search-engine pipeline context documented
-- [x] Data model designed (`doc_id`, `Posting {document_id, term_frequency}`,
-      postings lists always sorted by document ID)
-- [x] API proposed (`InvertedIndex` class: `add_document`, `postings`,
-      `document_count`, `term_count`, `contains`)
-- [x] Lookup semantics defined (`std::span<const Posting>`, empty for missing
-      terms, documented lifetime contract)
-- [x] Insertion semantics defined (unique docID precondition; duplicates
-      aggregated into term frequency)
-- [x] `unordered_map` vs `map` trade-offs analyzed; `unordered_map` chosen
-- [x] Complexity analyzed (O(1) average lookup; O(T) amortized per document;
-      O(distinct term-doc pairs) space)
-- [x] Edge-case table and testing strategy designed (12 test groups planned)
-- [x] Phase 1 → Phase 2 integration documented (index depends on the
-      tokenizer; both live in `dse_core`)
-- [x] Learning material: `docs/learning/phase-2-inverted-index.md`
-- [x] Architecture decision record: `docs/decisions/ADR-002-inverted-index-design.md`
-
-## Phase 2B (Implementation) — Completed
-
-- [x] `dse::InvertedIndex` implemented exactly per ADR-002
-      (`src/inverted_index.h`, `src/inverted_index.cpp`; added to `dse_core`)
-- [x] Document-ID/TF data model with postings always sorted by document ID
-- [x] Unique-docID precondition enforced (assert in debug builds)
-- [x] `std::span<const Posting>` lookups with documented lifetime contract
-- [x] `inverted_index_test.cpp` covers the 12 planned test groups plus
-      3 tokenizer-integration tests
-
-### Phase 2B Verification Results (actual, 2026-08-16, UCRT64 toolchain)
-
-- Build: **successful, zero warnings** (`-Wall -Wextra -Wpedantic`)
-- Tests: **99/99 passed (100%)** — 52 inverted-index tests (12 groups)
-  + 3 integration tests + 45 tokenizer tests + 2 Phase 0 smoke tests
-- Application: `DistributedSearchEngine.exe` ran with exit code 0
-- Total test time: ~1.9-2.2 s (functional check; **no performance
-  benchmark was performed**)
-
-## Phase 3A (Design & Learning) — Completed
-
-- [x] Query-processing pipeline context and Boolean retrieval semantics
-      documented (AND = intersection, OR = union over postings lists)
-- [x] Two-pointer merge algorithms specified step by step (intersection,
-      union, O(a + b) each)
-- [x] Missing-term, duplicate-term, and empty-query semantics defined
-- [x] API proposed (`intersect`, `merge_union` primitives + `QueryProcessor`
-      class with `and_query` / `or_query`; borrowed-index lifetime contract)
-- [x] Complexity and memory analysis (O(Q + V log V) prep; O(a + b) merges;
-      O(result) memory, no postings copies)
-- [x] Edge-case table (22 rows) and 12-group testing strategy designed
-- [x] Phase 1 → 2 → 3 integration documented (one-way dependencies,
-      all in `dse_core`)
-- [x] Deferrals documented (ranking/BM25, phrases, positions, fuzzy,
-      negation/query language, pagination, persistence, distribution)
-- [x] Learning material: `docs/learning/phase-3-query-processing.md`
-- [x] Architecture decision record: `docs/decisions/ADR-003-query-processing-design.md`
-
-### Phase 4B Verification Results (actual, UCRT64 toolchain)
-
-- Build: **successful, zero warnings**
-- Tests: **192/192 passed (100%)**
-  - 34 ranker tests (13 groups) + 60 query-processor tests + 52 inverted-index tests + 45 tokenizer tests + 2 smoke tests
-- Total test time: ~7.00 s
-- Application: exit code 0, C++20 (__cplusplus == 202002)
-
-## Completed: Phase 5B-1
-
-Phase 5B-1 — SearchService: **COMPLETE**
-
-- [x] SearchService class implemented (`src/search_service.h`, `src/search_service.cpp`)
-- [x] Request/response data model (`SearchRequest`, `SearchResponse`, `SearchResult`, `SearchMode`)
-- [x] Request validation (empty query, zero limit)
-- [x] AND/OR mode routing to Ranker
-- [x] Result limiting after ranking
-- [x] 28 SearchService unit tests (8 groups)
-
-### Phase 5B-1 Verification Results (actual, UCRT64 toolchain)
-
-- Build: **successful, zero warnings**
-- Tests: **220/220 passed (100%)**
-  - 28 search-service tests + 34 ranker tests + 60 query-processor tests + 52 inverted-index tests + 45 tokenizer tests + 2 smoke tests
-- Total test time: ~5.45 s
-
-## Completed: Phase 5B-2
-
-Phase 5B-2 — HTTP Server + HTTP API Integration Tests: **COMPLETE**
-
-- [x] HttpServer class implemented (`src/http_server.h`, `src/http_server.cpp`)
-- [x] GET /search endpoint with query parameters (q, mode, limit)
-- [x] JSON serialization using nlohmann/json
-- [x] HTTP status codes (200, 400, 500)
-- [x] Server lifecycle (start, stop, wait_until_ready, destructor)
-- [x] 19 HTTP API integration tests (real HTTP requests to localhost)
-
-### Phase 5B-2 Verification Results (actual, UCRT64 toolchain)
-
-- Build: **successful, zero warnings**
-- Tests: **239/239 passed (100%)**
-  - 19 HTTP API tests + 28 search-service tests + 34 ranker tests + 60 query-processor tests + 52 inverted-index tests + 45 tokenizer tests + 2 smoke tests
-- Total test time: ~51 s (HTTP tests dominate due to server lifecycle overhead)
-- Application: exit code 0, C++20 (__cplusplus == 202002)
-
-## Completed: Phase 5B-3
-
-Phase 5B-3 — Application Integration: **COMPLETE**
-
-- [x] Application entry point rewritten (`src/main.cpp`)
-- [x] Seed corpus: 20 documents covering animals, programming, infrastructure, search concepts
-- [x] Port configuration: `--port` CLI arg > `DSE_PORT` env var > default 8080
-- [x] Clean shutdown via SIGINT/SIGTERM signal handler
-- [x] `HttpServer::listen(port)` fixed to use specific port (not always OS-assigned)
-- [x] 5 application integration tests
-
-### Phase 5B-3 Verification Results (actual, UCRT64 toolchain)
-
-- Build: **successful, zero warnings**
-- Tests: **244/244 passed (100%)**
-  - 5 app integration tests + 19 HTTP API tests + 28 search-service tests + 34 ranker tests + 60 query-processor tests + 52 inverted-index tests + 45 tokenizer tests + 2 smoke tests
-- Total test time: ~66 s
-- Application: starts, serves HTTP, responds to curl, shuts down cleanly
-
-## Completed: Phase 4A
-
-- Phase 4A — Design and Learning: **COMPLETE**
-
-- [x] TF-IDF ranking design and learning documentation
-  (`docs/learning/phase-4-ranking.md`, `docs/decisions/ADR-004-ranking-design.md`)
-- [x] Ranker class API designed (`RankedResult`, `ranked_and`, `ranked_or`)
-- [x] Scoring formula specified (tfidf = tf × ln(N/df))
-- [x] Edge cases and testing strategy documented
-
-## Next Phase
-
-Phase 6 — Document Ingestion (to be implemented next)
+# Distributed Search Engine — Final Project Status
+
+## Project State: COMPLETE (Phase 30 Final Finish Line)
+
+The Distributed Search Engine (DSE) project has successfully concluded. All 30 engineering, resilience, concurrency, replication, messaging, benchmarking, and documentation phases have been implemented, empirically validated, and formally documented.
+
+- **Final Completed Phase:** Phase 30 — System Documentation, Operational Runbook, and Architecture Blueprint
+- **Milestone:** Absolute Finish Line (No Phase 31+)
+- **Production Code Status:** Frozen (zero modifications during Phase 30)
+- **Automated Test Suite Status:** **1085 / 1085 tests passing (100%)**
+- **Distributed System Validation:** Phase 29 End-to-End System Test (`PASS`), Live Kafka E2E (`PASS`), Benchmark D Concurrency (`PASS`)
+
+---
+
+## 1. Executive Summary of Accomplishments
+
+Over 30 distinct phases, the Distributed Search Engine was built from first principles in modern C++20 without external search platform dependencies:
+
+1. **Foundational Retrieval Engine (Phases 1–6):**
+   - Single-pass UTF-8 tokenizer with punctuation filtering and ASCII normalization.
+   - Concurrency-safe in-memory inverted index and document store with reader-writer locks (`std::shared_mutex`).
+   - Two-pointer Boolean set query algorithms (AND intersection, OR union).
+   - TF-IDF document ranking with collection-wide statistics.
+   - REST HTTP search and ingestion API with `cpp-httplib` and `nlohmann/json`.
+
+2. **Persistence, Lifecycle, and Sharding (Phases 7–10):**
+   - Append-only JSONL document persistence for crash durability and cold restart recovery.
+   - Full document CRUD lifecycle (create, update-in-place, delete) with atomic term frequency adjustments.
+   - In-process shard partitioning via consistent modulo hashing (`ShardRouter`).
+
+3. **Distributed Clustering & Resilience (Phases 11–16):**
+   - Abstract `NodeClient` model supporting both `LocalNode` and network `RemoteNode` implementations.
+   - Internal binary/JSON RPC layer (`NodeServer`) for inter-node communication.
+   - Formal failure semantics for partial node and network outages.
+   - Exponential backoff retries with full jitter (`RetryPolicy`).
+   - Three-state circuit breaker pattern (`CircuitBreaker`) preventing cascading cluster failures.
+   - Lock-free, in-process metrics collection (`MetricsCollector`) exposing operation counts and latency percentiles.
+
+4. **Cluster Authority & Event Outbox Pipeline (Phases 17–19):**
+   - **Phase 17 Synchronous All-Replica Replication:** Authoritative cluster write path in `ShardCoordinator` requiring all configured replicas to acknowledge mutations before client return.
+   - **Phase 18 Durable Outbox Event Pipeline:** `PersistentEventStore` recording mutation events to disk (`PENDING`, `DISPATCHING`, `PUBLISHED`, `FAILED`) with stable `EventId` assignments.
+   - **Phase 19 Native Apache Kafka Integration:** Native streaming via `librdkafka` (`KafkaMessageBroker`, `KafkaConsumer`, `RemoteEventProcessor`) with loopback suppression.
+
+5. **Operational Hardening & Observability (Phases 20–29):**
+   - Multi-node fault injection suite (Scenarios A–G) covering primary/secondary loss, Kafka partitions, and replay.
+   - Standalone performance benchmarks (Benchmarks A–J) characterizing tokenization, indexing, and saturation.
+   - Unified operational telemetry (`/metrics`) exposing end-to-end latencies, circuit states, outbox queues, and consumer lag.
+   - Transparent read failover with query-local replica pinning (Phase 24) and partial-availability search semantics (Phase 25).
+   - Dockerized 3-node replicated cluster with integrated Kafka KRaft broker (Phase 26).
+   - Application-level concurrency limits and HTTP 429 load-shedding guards (`RequestSlotGuard`, Phase 27).
+   - Phase 29 comprehensive system validation test and regression harness.
+
+6. **Final Documentation Package (Phase 30):**
+   - Complete architectural blueprint, operational runbook, API & metrics reference, failure semantics specification, ADR index, and project structure guide.
+
+---
+
+## 2. Final Documentation Package
+
+The complete architectural, operational, and design documentation is available in `docs/`:
+
+- **[Architecture Blueprint](docs/architecture-blueprint.md):** Complete architectural specification, Mermaid data flow diagrams, and detailed separation between the authoritative synchronous write tier and the asynchronous outbox stream.
+- **[Operational Runbook](docs/operational-runbook.md):** Verified 23-step local workflow covering cluster launch, operations, failover, Kafka recovery, explicit event replay, and benchmarks.
+- **[API & Metrics Reference](docs/api-and-metrics-reference.md):** Exhaustive reference for all HTTP endpoints (`/health`, `/metrics`, `/search`, `/documents`) and the `/metrics` telemetry dictionary.
+- **[Failure Semantics & Validation](docs/failure-semantics.md):** Detailed failure mode matrix, deliberate non-guarantees, and empirical validation results from Phase 29 and Benchmark D.
+- **[ADR Index](docs/adr-index.md):** Catalog of all 18 Architecture Decision Records ([ADR-001](docs/decisions/ADR-001-tokenizer-design.md) through [ADR-018](docs/decisions/ADR-018-unified-operational-observability.md)).
+- **[Project Structure](docs/project-structure.md):** Repository layout and subsystem responsibilities.
+
+---
+
+## 3. Empirical System Validation Summary
+
+### 3.1 CTest Automated Suite
+- **Total Tests:** 1085
+- **Passed:** 1085
+- **Failed:** 0
+- **Success Rate:** **100%**
+
+### 3.2 Phase 29 System Validation Test
+- **Binary:** `tests/phase29_system_integration_test.cpp`
+- **Result:** **PASS**
+- **Verified Capabilities:**
+  - 3-node HTTP & RPC cluster readiness.
+  - Synchronous all-replica replication ($R=3$).
+  - Full document CRUD lifecycle.
+  - Transparent read failover upon primary shutdown.
+  - Cold restart & shard persistence recovery.
+  - Authoritative write preservation during total Kafka outage.
+  - Durable `FAILED` state retention in `PersistentEventStore`.
+  - Zero automatic replay upon Kafka broker recovery.
+  - Explicit replay via `EventDispatcher::replay_failed()` with stable event ID.
+  - Final consistency and zero consumer lag.
+
+### 3.3 Benchmark D Concurrency & Saturation Results
+Multi-node concurrent query benchmark on live 3-node cluster ($N=3, S=3, R=3$):
+
+| Concurrency ($c$) | Completed Queries | Errors | P50 Latency (ms) | Throughput (req/s) |
+| :---: | :---: | :---: | :---: | :---: |
+| **$c = 1$** | 500 / 500 | 0 | 47.03 | 20.29 |
+| **$c = 2$** | 500 / 500 | 0 | 51.28 | 34.30 |
+| **$c = 4$** | 500 / 500 | 0 | 74.96 | 49.12 |
+| **$c = 8$** | 500 / 500 | 0 | 117.64 | 69.44 |
+| **$c = 16$** | 500 / 500 | 0 | 116.62 | 69.43 |
+
+*Compact in-process regression (Phase 29 test):* 50 queries, P50 = 47.97 ms, P99 = 75.81 ms, 100% success.
+
+---
+
+## 4. Phase Completion History
+
+| Phase | Description | Status | Validation Result |
+| :---: | :--- | :---: | :--- |
+| **0** | Project Foundation & Build Setup | **COMPLETE** | Toolchain & smoke tests verified |
+| **1** | Tokenization & Text Processing | **COMPLETE** | 45 tokenizer tests passed |
+| **2** | Inverted Index Engine | **COMPLETE** | 52 index tests passed |
+| **3** | Boolean Query Processing (AND/OR) | **COMPLETE** | 60 query tests passed |
+| **4** | TF-IDF & Ranking Engine | **COMPLETE** | 34 ranker tests passed |
+| **5** | SearchService & HTTP REST API | **COMPLETE** | 19 HTTP API tests passed |
+| **6** | Document Ingestion & Store | **COMPLETE** | Ingestion pipeline verified |
+| **7** | JSONL Document Persistence | **COMPLETE** | Durability & restart verified |
+| **8** | Concurrency & Thread Safety | **COMPLETE** | 368 tests passed (shared_mutex) |
+| **9** | Document Lifecycle (Update/Delete) | **COMPLETE** | Full CRUD verified |
+| **10** | Shard Partitioning & Hashing | **COMPLETE** | Consistent hashing verified |
+| **11** | Node Abstraction & RPC Clustering | **COMPLETE** | Multi-node routing verified |
+| **12** | Remote Node Network Transport | **COMPLETE** | RPC transport verified |
+| **13** | Retry Policy & Exponential Backoff | **COMPLETE** | Jitter retries verified |
+| **14** | Circuit Breaker Pattern | **COMPLETE** | Fast-fail & half-open verified |
+| **15** | Failure Semantics & Error Routing | **COMPLETE** | Partial degradation verified |
+| **16** | Observability & Metrics Foundation | **COMPLETE** | In-process metrics verified |
+| **17** | **Synchronous All-Replica Replication** | **COMPLETE** | Cluster authority tier verified |
+| **18** | **Durable Outbox Event Pipeline** | **COMPLETE** | PersistentEventStore verified |
+| **19** | **Native Apache Kafka Integration** | **COMPLETE** | librdkafka broker & consumer verified |
+| **20** | Multi-Node Resilience Verification | **COMPLETE** | Resilience tests passed |
+| **21** | Automated Benchmarking Suite (A–J) | **COMPLETE** | Benchmarks A–J characterized |
+| **22** | Unified Operational Observability | **COMPLETE** | End-to-end `/metrics` verified |
+| **23** | System Documentation & Operational Runbook | **COMPLETE** | Architecture blueprint & runbook verified |
+| **24** | Distributed Read Resilience & Failover | **COMPLETE** | Query replica pinning verified |
+| **25** | Partial-Availability Search Semantics | **COMPLETE** | Graceful degradation verified |
+| **26** | Dockerized 3-Node Replicated Cluster | **COMPLETE** | Compose cluster verified |
+| **27** | Concurrency Limits & Edge Shedding | **COMPLETE** | HTTP 429 load-shedding verified |
+| **28** | Failure Testing & Fault Injection | **COMPLETE** | Scenarios A–G verified |
+| **29** | Integrated System Validation & Regression | **COMPLETE** | 1085/1085 tests passing |
+| **30** | **Final Documentation, Runbook & Blueprint** | **COMPLETE** | All documents generated and validated |

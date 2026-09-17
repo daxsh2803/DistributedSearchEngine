@@ -21,6 +21,7 @@ The Distributed Search Engine is a high-performance information retrieval system
 
 ## 2. Project Status
 
+- **Project State: COMPLETE (Phase 30 Final Finish Line)**
 - **Completed Phases:**
   - **Phases 1–6:** Tokenization, Inverted Indexing, Query Processing (AND/OR), BM25/TF-IDF Ranking, REST Search API.
   - **Phases 7–10:** JSONL Persistence, Concurrency & Thread Safety, Document Lifecycle CRUD, Shard Partitioning & Hashing.
@@ -30,8 +31,8 @@ The Distributed Search Engine is a high-performance information retrieval system
   - **Phases 20–22:** Multi-Node Resilience Verification, Automated Benchmarking Suite (Benchmarks A–J), **Unified Operational Observability**.
   - **Phases 24–26:** Distributed Read Resilience & Query Failover, Partial-Availability Search Semantics, Dockerized 3-Node Replicated Cluster.
   - **Phases 27–29:** Concurrency Limits & Edge Shedding, Failure Testing & Fault Injection Scenarios (A–G), **Integrated System Validation & Regression Suite**.
-- **Current Phase:**
   - **Phase 30:** Comprehensive System Documentation, Operational Runbook, and Architecture Blueprint (Absolute finish line).
+- **Test Suite Status:** **1085 / 1085 automated tests passing (100%)**.
 
 ---
 
@@ -110,37 +111,38 @@ For detailed operational and architecture documentation, see [docker/README.md](
 | Endpoint | Method | Purpose | Example Request / Output |
 | :--- | :---: | :--- | :--- |
 | `/documents` | `POST` | Ingest new document | `{"id": 1, "content": "system resilience"}` |
-| `/documents/{id}` | `GET` | Retrieve document | Returns document JSON or HTTP 404 |
-| `/documents/{id}` | `PUT` | Update document | `{"id": 1, "content": "updated content"}` |
-| `/documents/{id}` | `DELETE` | Remove document | Deletes document across all replicas |
-| `/search` | `GET` | Cross-shard ranked query | `/search?q=system+resilience&mode=and&limit=10` |
-| `/health` | `GET` | Process health check | `{"status": "healthy"}` |
+| `/documents/:id` | `PUT` | Update document | `{"content": "updated content"}` |
+| `/documents/:id` | `DELETE` | Remove document | Deletes document across all replicas |
+| `/search` | `GET` | Cross-shard ranked query | `/search?q=system+resilience&mode=or&limit=10` |
+| `/health` | `GET` | Process health check | `{"status": "ok"}` |
 | `/metrics` | `GET` | In-process operational telemetry | Returns JSON with latencies, outbox, and lag |
+
+For complete payload formats and error codes, see [docs/api-and-metrics-reference.md](docs/api-and-metrics-reference.md).
 
 ---
 
 ## 6. Repository Layout & Documentation Map
 
-All major architectural milestones through Phase 22 are now documented, with ADRs covering significant architectural decisions and learning notes covering the completed phases.
+The comprehensive Phase 30 documentation package is organized as follows:
 
 ```
-├── README.md                           # This document
-├── AGENTS.md                           # Developer guidelines & phase constraints
+├── README.md                           # Project overview, quickstart, and status
+├── AGENTS.md                           # Development methodology & architectural boundaries
+├── PROJECT_STATUS.md                   # Final Phase 30 status & milestone verification
 ├── docs/
-│   ├── architecture/
-│   │   └── system-architecture.md      # Authoritative system blueprint & data flows
-│   ├── operations/
-│   │   └── runbook.md                  # Comprehensive operator & deployment runbook
-│   ├── decisions/                      # Architecture Decision Records (ADR-001 to ADR-018)
-│   │   ├── ADR-016-synchronous-replication-authority.md
-│   │   ├── ADR-017-durable-outbox-event-pipeline.md
-│   │   └── ADR-018-unified-operational-observability.md
+│   ├── architecture-blueprint.md       # Authoritative system blueprint & data flows
+│   ├── operational-runbook.md          # 23-step reproducible operator & deployment runbook
+│   ├── api-and-metrics-reference.md    # Exhaustive HTTP routes & telemetry metrics dictionary
+│   ├── failure-semantics.md            # Failure matrix, non-guarantees & validation benchmarks
+│   ├── adr-index.md                    # Architecture Decision Records index (ADR-001 to ADR-018)
+│   ├── project-structure.md            # Codebase directory layout & component responsibilities
+│   ├── decisions/                      # Architecture Decision Records (ADR-001 through ADR-018)
 │   └── learning/                       # Deep-dive learning notes (Phases 0–22)
 ├── src/                                # Engine C++20 source & headers
-├── tests/                              # GoogleTest suites (1051 tests)
+├── tests/                              # GoogleTest suites (1085 tests) & E2E orchestrators
 ├── benchmarks/                         # Performance & chaos harness scripts (A–J)
 ├── results/                            # Recorded benchmark CSV outputs
-└── docker/                             # Apache Kafka Docker Compose setup
+└── docker/                             # Apache Kafka Docker Compose setup & cluster manifests
 ```
 
 ---
