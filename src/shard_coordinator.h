@@ -1,0 +1,171 @@
+// Distributed Search Engine - Shard Coordinator (Phase 11).
+//
+// The ShardCoordinator manages multiple nodes and routes document
+// operations to the correct shard via ShardRouter → ShardPlacement
+// → NodeClient.
+//
+// Responsibilities:
+//   - Write routing: create/update/delete/get all route to the owning
+//     node via NodeClient.
+//   - Cross-shard search: collects postings from all shards through
+//     NodeClient, computes global TF-IDF statistics, and returns
+//     globally ranked results.
+//   - Persistence: delegates to each node's own save/load.
+//
+// The coordinator does NOT access Shard internals directly.
+// All shard access goes through the NodeClient interface.
+//
+// Thread safety:
+//   - search() issues parallel std::async fan-out to nodes and
+//     computes global TF-IDF scoring.
+//   - ingest/update/remove route to the owning node; same-shard
+//     mutations are serialized by the shard's internal mutex.
+
+#pragma once
+
+#include <cstddef>
+#include <memory>
+#include <optional>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+#include "document_store.h"  // for Document
+#include "event_dispatcher.h"
+#include "event_store.h"
+#include "inverted_index.h"   // for doc_id, Posting
+#include "metrics.h"
+#include "node_client.h"
+#include "node_config.h"
+#include "replica_placement.h"
+#include "search_service.h"   // for SearchRequest, SearchResponse
+#include "shard_router.h"
+
+namespace dse {
+
+// Request/response types for ingestion via coordinator.
+struct CoordinatorIngestRequest {
+    doc_id id;
+    std::string content;
+};
+
+struct CoordinatorIngestResponse {
+    doc_id document_id = 0;
+    std::size_t terms_indexed = 0;
+    bool is_error = false;
+    std::string error_message;
+};
+
+struct CoordinatorUpdateRequest {
+    doc_id id;
+    std::string content;
+};
+
+struct CoordinatorUpdateResponse {
+    doc_id document_id = 0;
+    std::size_t terms_indexed = 0;
+    bool is_error = false;
+    std::string error_message;
+};
+
+struct CoordinatorDeleteResponse {
+    bool is_error = false;
+    std::string error_message;
+};
+
+class ShardCoordinator {
+public:
+    // Construct a coordinator with routing, replica placement, and nodes.
+    // The coordinator takes ownership of all provided objects.
+    //
+    // nodes must be indexed by node_id and contain at least
+    // placement.node_count() entries.
+    ShardCoordinator(std::unique_ptr<ShardRouter> router,
+                     std::unique_ptr<ShardReplicaPlacement> placement,
+                     std::vector<std::unique_ptr<NodeClient>> nodes);
+
+    // Convenience constructor: legacy single-replica placement.
+    // Converts ShardPlacement (shard→single node) to R=1 ShardReplicaPlacement.
+    ShardCoordinator(std::unique_ptr<ShardRouter> router,
+                     std::unique_ptr<ShardPlacement> placement,
+                     std::vector<std::unique_ptr<NodeClient>> nodes);
+
+    // Set an optional metrics collector for observability.
+    // Pass nullptr to disable metrics (default).
+    void set_metrics(MetricsCollector* metrics);
+
+    // Set an optional event dispatcher for asynchronous domain event
+    // publication. Pass nullptr to disable event publishing (default).
+    // When set, successful document mutations enqueue domain events
+    // for asynchronous dispatch. One event per logical user operation,
+    // regardless of replication factor.
+    void set_event_dispatcher(EventDispatcher* dispatcher);
+
+    // Set an optional event store for reliable delivery tracking.
+    // Pass nullptr to disable event tracking (default).
+    // When set, successful document mutations create a tracked event
+    // with a stable event_id before enqueueing for dispatch.
+    void set_event_store(EventStore* store);
+
+    // --- Search ---
+    // Cross-shard search with global TF-IDF scoring.
+    // Issues parallel fan-out to all nodes via std::async.
+    SearchResponse search(const SearchRequest& request) const;
+
+    // --- Write operations ---
+    CoordinatorIngestResponse ingest(const CoordinatorIngestRequest& request);
+    CoordinatorUpdateResponse update(const CoordinatorUpdateRequest& request);
+    CoordinatorDeleteResponse remove(doc_id id);
+
+    // --- Read operations ---
+    std::optional<Document> get_document(doc_id id) const;
+
+    // Total document count across all shards.
+    std::size_t total_document_count() const;
+
+    // --- Persistence ---
+    bool save_all() const;
+    bool load_all();
+
+    // --- Accessors ---
+    std::size_t shard_count() const;
+    std::size_t node_count() const;
+
+    // Get a node by index. For tests and diagnostics.
+    const NodeClient& node(std::size_t index) const;
+
+private:
+    // Find the NodeClient that owns a given shard (primary).
+    NodeClient& node_for_shard(std::size_t shard_id) const;
+
+    // Get all replicas for a shard.
+    const std::vector<std::size_t>& replicas_for_shard(std::size_t shard_id) const;
+
+    // Collect postings for a term across all shards, recording failures.
+    // Uses query-locally pinned replicas per shard (Phase 24).
+    struct PostingsResult {
+        std::vector<Posting> postings;
+        std::vector<NodeFailureInfo> failures;
+    };
+    PostingsResult collect_postings(
+        std::string_view term,
+        const std::vector<std::optional<std::size_t>>& pinned_nodes) const;
+
+    // Compute global document count, recording failures and pinned replicas (Phase 24).
+    struct GlobalNResult {
+        std::size_t total = 0;
+        bool complete = true;
+        std::vector<NodeFailureInfo> failures;
+        std::vector<std::optional<std::size_t>> pinned_nodes;
+    };
+    GlobalNResult compute_global_n() const;
+
+    std::unique_ptr<ShardRouter> router_;
+    std::unique_ptr<ShardReplicaPlacement> placement_;
+    std::vector<std::unique_ptr<NodeClient>> nodes_;
+    MetricsCollector* metrics_ = nullptr;   // optional, not owned
+    EventDispatcher* dispatcher_ = nullptr;  // optional, not owned
+    EventStore* event_store_ = nullptr;      // optional, not owned
+};
+
+} // namespace dse
