@@ -167,6 +167,7 @@ The authoritative Phase 30 design documentation can be found in the `docs/` dire
 - **[ADR Index](docs/adr-index.md):** Architecture Decision Records (ADR-001 through ADR-018).
 - **[Project Structure](docs/project-structure.md):** Codebase layout and responsibility mapping.
 - **[Phase Status Map](PROJECT_STATUS.md):** Milestone history and verification record.
+- **[End-to-End Demonstration](docs/demos/end-to-end-demo.md):** Permanent record of the live cluster E2E verification.
 
 ## Project Status
 
